@@ -48,7 +48,8 @@ DEFAULT_CONFIG = {
 DEFAULT_STATE = {
     "failStreak": 0,
     "downNotified": False,
-    "lastAlertTs": 0
+    "lastAlertTs": 0,
+    "lastStatus": None
 }
 
 # MeshMonitor hard timeout limit (seconds)
@@ -414,6 +415,35 @@ def should_fire_up_alert(all_ok: bool, down_notified: bool) -> bool:
     return all_ok and down_notified
 
 
+def should_fire_partial_recovery_alert(last_status: Optional[str], current_status: Optional[str],
+                                       down_notified: bool, last_alert_ts: int, backoff_seconds: int) -> bool:
+    """
+    Check if partial recovery alert should fire (ispDown → upstreamDnsDown).
+    
+    Args:
+        last_status: Previous status classification
+        current_status: Current status classification
+        down_notified: Whether down alert was previously sent
+        last_alert_ts: Timestamp of last alert
+        backoff_seconds: Backoff period in seconds
+        
+    Returns:
+        True if partial recovery alert should fire
+    """
+    if last_status != "ispDown":
+        return False
+    if current_status != "upstreamDnsDown":
+        return False
+    if not down_notified:
+        return False
+    # Check backoff
+    current_time = int(time.time())
+    time_since_last = current_time - last_alert_ts
+    if time_since_last < backoff_seconds:
+        return False
+    return True
+
+
 def emit_alert(message: str) -> None:
     """
     Output JSON alert to stdout.
@@ -468,6 +498,7 @@ def main() -> None:
     fail_streak = state.get("failStreak", 0)
     down_notified = state.get("downNotified", False)
     last_alert_ts = state.get("lastAlertTs", 0)
+    last_status = state.get("lastStatus", None)
     
     # Validate required commands are available
     router_check_type = router_check.get("type", "https").lower()
@@ -515,6 +546,8 @@ def main() -> None:
     fire_down = should_fire_down_alert(fail_streak, must_fail_count, down_notified,
                                        last_alert_ts, backoff_seconds)
     fire_up = should_fire_up_alert(all_ok, down_notified)
+    fire_partial_recovery = should_fire_partial_recovery_alert(last_status, status, down_notified,
+                                                                last_alert_ts, backoff_seconds)
     
     # Emit alerts and update state
     if fire_down:
@@ -539,10 +572,18 @@ def main() -> None:
         down_notified = False
         last_alert_ts = int(time.time())
     
+    elif fire_partial_recovery:
+        # Partial recovery: ispDown → upstreamDnsDown
+        template = messages.get("upstreamDnsDown", "DNS resolvers failed: {{failed}}")
+        message = replace_placeholders(template, failed_dns)
+        emit_alert(message)
+        last_alert_ts = int(time.time())
+    
     # Save updated state
     state["failStreak"] = fail_streak
     state["downNotified"] = down_notified
     state["lastAlertTs"] = last_alert_ts
+    state["lastStatus"] = status
     save_state(state)
 
 
