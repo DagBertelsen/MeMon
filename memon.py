@@ -13,6 +13,7 @@ Implements failure streak tracking with backoff logic.
 
 import json
 import os
+import shutil
 import sys
 import subprocess
 import time
@@ -52,6 +53,19 @@ DEFAULT_STATE = {
 
 # MeshMonitor hard timeout limit (seconds)
 MESHMONITOR_TIMEOUT = 10
+
+
+def check_command_available(cmd: str) -> bool:
+    """
+    Check if a command is available in the system PATH.
+    
+    Args:
+        cmd: Command name to check (e.g., 'ping', 'dig', 'nslookup')
+        
+    Returns:
+        True if command is available, False otherwise
+    """
+    return shutil.which(cmd) is not None
 
 
 def load_config(config_path: str = "memon.config.json") -> Dict[str, Any]:
@@ -454,6 +468,18 @@ def main() -> None:
     fail_streak = state.get("failStreak", 0)
     down_notified = state.get("downNotified", False)
     last_alert_ts = state.get("lastAlertTs", 0)
+    
+    # Validate required commands are available
+    router_check_type = router_check.get("type", "https").lower()
+    if router_check_type == "ping":
+        if not check_command_available("ping"):
+            print("Error: 'ping' command not found. Install it or use routerCheck.type='https'", file=sys.stderr)
+            sys.exit(1)
+    
+    if dns_checks:
+        if not check_command_available("dig") and not check_command_available("nslookup"):
+            print("Error: Neither 'dig' nor 'nslookup' command found. Install at least one (e.g., 'sudo apt install bind9-dnsutils' on Debian/Ubuntu)", file=sys.stderr)
+            sys.exit(1)
     
     # Calculate remaining time (ensure we finish before MeshMonitor timeout)
     elapsed = time.time() - start_time

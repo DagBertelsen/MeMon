@@ -331,6 +331,8 @@ The script ensures total execution time stays under 10 seconds (MeshMonitor hard
 - Check system has `dig` or `nslookup` installed
 - Try different DNS servers (e.g., 1.1.1.1, 8.8.8.8)
 
+**Note**: The script will fail early with a clear error message to stderr if required commands are missing. For DNS checks, at least one of `dig` or `nslookup` must be available. For ping router checks, `ping` must be available.
+
 ### Router Check Fails with HTTPS
 
 **Problem**: HTTPS router check fails even when router is accessible.
@@ -342,8 +344,10 @@ The script ensures total execution time stays under 10 seconds (MeshMonitor hard
 
 **Solutions**:
 - Set `"insecureTls": true` in router check configuration
-- Try PING check instead: `"type": "ping"`
+- Try PING check instead: `"type": "ping"` (requires `ping` command to be available)
 - Verify router host/URL is correct and accessible from browser
+
+**Note**: If using `"type": "ping"`, the `ping` command must be available on the system. The script will fail early with a clear error message if `ping` is missing.
 
 ### Script Times Out
 

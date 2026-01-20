@@ -11,6 +11,7 @@ import time
 import subprocess
 import urllib.error
 import ssl
+import shutil
 
 # Import the module under test
 import memon
@@ -536,6 +537,220 @@ class TestEmitAlert(unittest.TestCase):
             # Verify the message passed to json.dumps is truncated
             call_args = mock_dumps.call_args[0][0]
             self.assertEqual(len(call_args["response"]), 200)
+
+
+class TestCommandAvailability(unittest.TestCase):
+    """Test command availability checking functionality."""
+    
+    @patch('shutil.which')
+    def test_check_command_available_true(self, mock_which):
+        """Test check_command_available returns True when command exists."""
+        mock_which.return_value = "/usr/bin/ping"
+        result = memon.check_command_available("ping")
+        self.assertTrue(result)
+        mock_which.assert_called_once_with("ping")
+    
+    @patch('shutil.which')
+    def test_check_command_available_false(self, mock_which):
+        """Test check_command_available returns False when command doesn't exist."""
+        mock_which.return_value = None
+        result = memon.check_command_available("nonexistent")
+        self.assertFalse(result)
+        mock_which.assert_called_once_with("nonexistent")
+    
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.load_config')
+    @patch('memon.check_command_available')
+    @patch('sys.exit')
+    def test_main_fails_when_ping_missing(self, mock_exit, mock_check_cmd, mock_load_config,
+                                          mock_load_state, mock_save_state):
+        """Test main() fails early when ping is missing but routerCheck.type='ping'."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 900,
+            "messages": {},
+            "routerCheck": {"type": "ping", "host": "192.168.1.1"},
+            "dnsChecks": []
+        }
+        mock_load_state.return_value = {
+            "failStreak": 0,
+            "downNotified": False,
+            "lastAlertTs": 0
+        }
+        # ping not available
+        def check_side_effect(cmd):
+            return cmd != "ping"
+        mock_check_cmd.side_effect = check_side_effect
+        
+        memon.main()
+        mock_exit.assert_called_once_with(1)
+        mock_save_state.assert_not_called()
+    
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.load_config')
+    @patch('memon.check_command_available')
+    @patch('sys.exit')
+    def test_main_fails_when_dns_commands_missing(self, mock_exit, mock_check_cmd, mock_load_config,
+                                                   mock_load_state, mock_save_state):
+        """Test main() fails early when dig/nslookup missing but dnsChecks configured."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 900,
+            "messages": {},
+            "routerCheck": {"type": "https", "host": "https://192.168.1.1"},
+            "dnsChecks": [
+                {"name": "DNS1", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"}
+            ]
+        }
+        mock_load_state.return_value = {
+            "failStreak": 0,
+            "downNotified": False,
+            "lastAlertTs": 0
+        }
+        # Neither dig nor nslookup available
+        mock_check_cmd.return_value = False
+        
+        memon.main()
+        mock_exit.assert_called_once_with(1)
+        mock_save_state.assert_not_called()
+    
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.load_config')
+    @patch('memon.check_command_available')
+    @patch('memon.check_router')
+    @patch('memon.check_all_dns')
+    def test_main_continues_when_commands_available(self, mock_check_dns, mock_check_router,
+                                                     mock_check_cmd, mock_load_config,
+                                                     mock_load_state, mock_save_state):
+        """Test main() continues normally when commands are available."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 900,
+            "messages": {},
+            "routerCheck": {"type": "ping", "host": "192.168.1.1"},
+            "dnsChecks": [
+                {"name": "DNS1", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"}
+            ]
+        }
+        mock_load_state.return_value = {
+            "failStreak": 0,
+            "downNotified": False,
+            "lastAlertTs": 0
+        }
+        # All commands available
+        mock_check_cmd.return_value = True
+        mock_check_router.return_value = True
+        mock_check_dns.return_value = ([], ["DNS1"])
+        
+        memon.main()
+        mock_save_state.assert_called_once()
+    
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.load_config')
+    @patch('memon.check_command_available')
+    @patch('memon.check_router')
+    @patch('memon.check_all_dns')
+    def test_main_continues_when_commands_not_needed(self, mock_check_dns, mock_check_router,
+                                                     mock_check_cmd, mock_load_config,
+                                                     mock_load_state, mock_save_state):
+        """Test main() continues normally when commands not needed (HTTPS router, no DNS)."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 900,
+            "messages": {},
+            "routerCheck": {"type": "https", "host": "https://192.168.1.1"},
+            "dnsChecks": []
+        }
+        mock_load_state.return_value = {
+            "failStreak": 0,
+            "downNotified": False,
+            "lastAlertTs": 0
+        }
+        mock_check_router.return_value = True
+        mock_check_dns.return_value = ([], [])
+        
+        memon.main()
+        # check_command_available should not be called since no commands are needed
+        mock_check_cmd.assert_not_called()
+        mock_save_state.assert_called_once()
+    
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.load_config')
+    @patch('memon.check_command_available')
+    @patch('memon.check_router')
+    @patch('memon.check_all_dns')
+    def test_main_continues_when_dig_available(self, mock_check_dns, mock_check_router,
+                                               mock_check_cmd, mock_load_config,
+                                               mock_load_state, mock_save_state):
+        """Test main() continues when dig is available (nslookup not needed)."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 900,
+            "messages": {},
+            "routerCheck": {"type": "https", "host": "https://192.168.1.1"},
+            "dnsChecks": [
+                {"name": "DNS1", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"}
+            ]
+        }
+        mock_load_state.return_value = {
+            "failStreak": 0,
+            "downNotified": False,
+            "lastAlertTs": 0
+        }
+        # dig available, nslookup not needed
+        def check_side_effect(cmd):
+            return cmd == "dig"
+        mock_check_cmd.side_effect = check_side_effect
+        mock_check_router.return_value = True
+        mock_check_dns.return_value = ([], ["DNS1"])
+        
+        memon.main()
+        mock_save_state.assert_called_once()
+    
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.load_config')
+    @patch('memon.check_command_available')
+    @patch('memon.check_router')
+    @patch('memon.check_all_dns')
+    def test_main_continues_when_nslookup_available(self, mock_check_dns, mock_check_router,
+                                                    mock_check_cmd, mock_load_config,
+                                                    mock_load_state, mock_save_state):
+        """Test main() continues when nslookup is available (dig not needed)."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 900,
+            "messages": {},
+            "routerCheck": {"type": "https", "host": "https://192.168.1.1"},
+            "dnsChecks": [
+                {"name": "DNS1", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"}
+            ]
+        }
+        mock_load_state.return_value = {
+            "failStreak": 0,
+            "downNotified": False,
+            "lastAlertTs": 0
+        }
+        # nslookup available, dig not needed
+        def check_side_effect(cmd):
+            return cmd == "nslookup"
+        mock_check_cmd.side_effect = check_side_effect
+        mock_check_router.return_value = True
+        mock_check_dns.return_value = ([], ["DNS1"])
+        
+        memon.main()
+        mock_save_state.assert_called_once()
 
 
 if __name__ == '__main__':
