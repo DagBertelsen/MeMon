@@ -64,6 +64,7 @@ class TestStateLoading(unittest.TestCase):
             self.assertEqual(state["failStreak"], 0)
             self.assertEqual(state["downNotified"], False)
             self.assertEqual(state["lastAlertTs"], 0)
+            self.assertEqual(state["lastFailedDns"], [])
     
     def test_load_state_from_file(self):
         """Test loading state from existing file."""
@@ -400,68 +401,91 @@ class TestAlertLogic(unittest.TestCase):
     
     def test_should_fire_partial_recovery_alert_from_isp_down(self):
         """Test partial recovery alert fires when transitioning from ispDown to upstreamDnsDown."""
-        current_time = int(time.time())
-        old_alert = current_time - 1000  # 1000 seconds ago, backoff is 900
         result = memon.should_fire_partial_recovery_alert(
             last_status="ispDown",
             current_status="upstreamDnsDown",
             down_notified=True,
-            last_alert_ts=old_alert,
-            backoff_seconds=900
+            last_failed_dns=["DNS1", "DNS2", "DNS3"],
+            current_failed_dns=["DNS1", "DNS2"]
         )
         self.assertTrue(result)
     
     def test_should_fire_partial_recovery_alert_not_previously_isp_down(self):
-        """Test partial recovery alert doesn't fire if previous status wasn't ispDown."""
-        current_time = int(time.time())
-        old_alert = current_time - 1000
+        """Test partial recovery alert doesn't fire if previous status wasn't ispDown and no fewer failures."""
         result = memon.should_fire_partial_recovery_alert(
             last_status="upstreamDnsDown",
             current_status="upstreamDnsDown",
             down_notified=True,
-            last_alert_ts=old_alert,
-            backoff_seconds=900
+            last_failed_dns=["DNS1", "DNS2"],
+            current_failed_dns=["DNS1", "DNS2"]
         )
         self.assertFalse(result)
     
+    def test_should_fire_partial_recovery_alert_upstream_to_upstream_fewer_failures(self):
+        """Test partial recovery alert fires when transitioning from upstreamDnsDown with more failures to fewer failures."""
+        result = memon.should_fire_partial_recovery_alert(
+            last_status="upstreamDnsDown",
+            current_status="upstreamDnsDown",
+            down_notified=True,
+            last_failed_dns=["DNS1", "DNS2", "DNS3"],
+            current_failed_dns=["DNS1"]
+        )
+        self.assertTrue(result)
+    
     def test_should_fire_partial_recovery_alert_not_currently_upstream_dns_down(self):
         """Test partial recovery alert doesn't fire if current status isn't upstreamDnsDown."""
-        current_time = int(time.time())
-        old_alert = current_time - 1000
         result = memon.should_fire_partial_recovery_alert(
             last_status="ispDown",
             current_status="routerDown",
             down_notified=True,
-            last_alert_ts=old_alert,
-            backoff_seconds=900
+            last_failed_dns=["DNS1", "DNS2", "DNS3"],
+            current_failed_dns=[]
         )
         self.assertFalse(result)
     
     def test_should_fire_partial_recovery_alert_not_down_notified(self):
         """Test partial recovery alert doesn't fire if down alert wasn't previously sent."""
-        current_time = int(time.time())
-        old_alert = current_time - 1000
         result = memon.should_fire_partial_recovery_alert(
             last_status="ispDown",
             current_status="upstreamDnsDown",
             down_notified=False,
-            last_alert_ts=old_alert,
-            backoff_seconds=900
+            last_failed_dns=["DNS1", "DNS2", "DNS3"],
+            current_failed_dns=["DNS1", "DNS2"]
         )
         self.assertFalse(result)
     
-    def test_should_fire_partial_recovery_alert_backoff(self):
-        """Test partial recovery alert doesn't fire during backoff period."""
-        current_time = int(time.time())
-        recent_alert = current_time - 100  # 100 seconds ago, backoff is 900
+    def test_should_fire_partial_recovery_alert_bypasses_backoff(self):
+        """Test partial recovery alert fires even during backoff period (backoff bypassed for recovery)."""
         result = memon.should_fire_partial_recovery_alert(
             last_status="ispDown",
             current_status="upstreamDnsDown",
             down_notified=True,
-            last_alert_ts=recent_alert,
-            backoff_seconds=900
+            last_failed_dns=["DNS1", "DNS2", "DNS3"],
+            current_failed_dns=["DNS1", "DNS2"]
         )
-        self.assertFalse(result)
+        self.assertTrue(result)
+    
+    def test_should_fire_partial_recovery_alert_router_down_to_isp_down(self):
+        """Test partial recovery alert fires when transitioning from routerDown to ispDown."""
+        result = memon.should_fire_partial_recovery_alert(
+            last_status="routerDown",
+            current_status="ispDown",
+            down_notified=True,
+            last_failed_dns=[],
+            current_failed_dns=["DNS1", "DNS2", "DNS3"]
+        )
+        self.assertTrue(result)
+    
+    def test_should_fire_partial_recovery_alert_router_down_to_upstream_dns_down(self):
+        """Test partial recovery alert fires when transitioning from routerDown to upstreamDnsDown."""
+        result = memon.should_fire_partial_recovery_alert(
+            last_status="routerDown",
+            current_status="upstreamDnsDown",
+            down_notified=True,
+            last_failed_dns=[],
+            current_failed_dns=["DNS1", "DNS2"]
+        )
+        self.assertTrue(result)
 
 
 class TestPlaceholderReplacement(unittest.TestCase):
@@ -607,7 +631,8 @@ class TestMainFunction(unittest.TestCase):
             "failStreak": 4,
             "downNotified": True,
             "lastAlertTs": old_alert,
-            "lastStatus": "ispDown"
+            "lastStatus": "ispDown",
+            "lastFailedDns": ["DNS1", "DNS2", "DNS3"]
         }
         mock_check_router.return_value = True
         # 1 DNS recovered, 2 still down
@@ -632,9 +657,9 @@ class TestMainFunction(unittest.TestCase):
     @patch('memon.check_router')
     @patch('memon.check_all_dns')
     @patch('memon.emit_alert')
-    def test_main_no_partial_recovery_during_backoff(self, mock_emit, mock_check_dns, mock_check_router,
-                                                      mock_load_config, mock_load_state, mock_save_state):
-        """Test main function doesn't fire partial recovery alert during backoff period."""
+    def test_main_partial_recovery_bypasses_backoff(self, mock_emit, mock_check_dns, mock_check_router,
+                                                     mock_load_config, mock_load_state, mock_save_state):
+        """Test main function fires partial recovery alert even during backoff period (backoff bypassed)."""
         current_time = int(time.time())
         recent_alert = current_time - 100  # 100 seconds ago, backoff is 900
         mock_load_config.return_value = {
@@ -652,7 +677,8 @@ class TestMainFunction(unittest.TestCase):
             "failStreak": 4,
             "downNotified": True,
             "lastAlertTs": recent_alert,
-            "lastStatus": "ispDown"
+            "lastStatus": "ispDown",
+            "lastFailedDns": ["DNS1", "DNS2"]
         }
         mock_check_router.return_value = True
         # 1 DNS recovered, 1 still down
@@ -660,10 +686,196 @@ class TestMainFunction(unittest.TestCase):
         
         memon.main()
         
-        # Verify no alert was emitted (backoff period)
-        mock_emit.assert_not_called()
-        # Verify state was still saved
+        # Verify alert was emitted (backoff bypassed for recovery)
+        mock_emit.assert_called_once()
+        # Verify state was saved
         mock_save_state.assert_called_once()
+    
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.load_config')
+    @patch('memon.check_router')
+    @patch('memon.check_all_dns')
+    @patch('memon.emit_alert')
+    def test_main_partial_recovery_upstream_to_upstream(self, mock_emit, mock_check_dns, mock_check_router,
+                                                         mock_load_config, mock_load_state, mock_save_state):
+        """Test main function fires partial recovery alert when upstreamDnsDown → upstreamDnsDown with fewer failures."""
+        current_time = int(time.time())
+        recent_alert = current_time - 100  # 100 seconds ago, backoff is 900
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 900,
+            "messages": {"upstreamDnsDown": "DNS resolvers failed: {{failed}}"},
+            "routerCheck": {},
+            "dnsChecks": [
+                {"name": "DNS1", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"},
+                {"name": "DNS2", "server": "1.1.1.1", "qname": "cloudflare.com", "rrtype": "A"},
+                {"name": "DNS3", "server": "9.9.9.9", "qname": "quad9.net", "rrtype": "A"}
+            ]
+        }
+        mock_load_state.return_value = {
+            "failStreak": 5,
+            "downNotified": True,
+            "lastAlertTs": recent_alert,
+            "lastStatus": "upstreamDnsDown",
+            "lastFailedDns": ["DNS1", "DNS2", "DNS3"]
+        }
+        mock_check_router.return_value = True
+        # 2 DNS recovered, 1 still down
+        mock_check_dns.return_value = (["DNS1"], ["DNS1", "DNS2", "DNS3"])
+        
+        memon.main()
+        
+        # Verify alert was emitted (partial recovery detected)
+        mock_emit.assert_called_once()
+        call_args = mock_emit.call_args[0][0]
+        self.assertIn("DNS1", call_args)
+        # Verify state was saved with updated lastFailedDns
+        mock_save_state.assert_called_once()
+        saved_state = mock_save_state.call_args[0][0]
+        self.assertEqual(saved_state["lastFailedDns"], ["DNS1"])
+        self.assertEqual(saved_state["lastStatus"], "upstreamDnsDown")
+    
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.load_config')
+    @patch('memon.check_router')
+    @patch('memon.check_all_dns')
+    @patch('memon.emit_alert')
+    def test_main_router_down_all_dns_down(self, mock_emit, mock_check_dns, mock_check_router,
+                                            mock_load_config, mock_load_state, mock_save_state):
+        """Test main function when router is down and all DNS would be down (DNS checks skipped)."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 900,
+            "messages": {"routerDown": "Router is down"},
+            "routerCheck": {},
+            "dnsChecks": [
+                {"name": "DNS1", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"},
+                {"name": "DNS2", "server": "1.1.1.1", "qname": "cloudflare.com", "rrtype": "A"},
+                {"name": "DNS3", "server": "9.9.9.9", "qname": "quad9.net", "rrtype": "A"}
+            ]
+        }
+        mock_load_state.return_value = {
+            "failStreak": 2,
+            "downNotified": False,
+            "lastAlertTs": 0,
+            "lastStatus": None,
+            "lastFailedDns": []
+        }
+        mock_check_router.return_value = False  # Router down
+        # DNS checks should not be called when router is down
+        mock_check_dns.return_value = ([], [])
+        
+        memon.main()
+        
+        # Verify routerDown alert was emitted after mustFailCount
+        mock_emit.assert_called_once()
+        call_args = mock_emit.call_args[0][0]
+        self.assertEqual(call_args, "Router is down")
+        # Verify DNS checks were not called (router down skips DNS)
+        mock_check_dns.assert_not_called()
+        # Verify state was saved
+        mock_save_state.assert_called_once()
+        saved_state = mock_save_state.call_args[0][0]
+        self.assertEqual(saved_state["lastStatus"], "routerDown")
+        self.assertTrue(saved_state["downNotified"])
+    
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.load_config')
+    @patch('memon.check_router')
+    @patch('memon.check_all_dns')
+    @patch('memon.emit_alert')
+    def test_main_router_recovery_all_dns_down(self, mock_emit, mock_check_dns, mock_check_router,
+                                                mock_load_config, mock_load_state, mock_save_state):
+        """Test main function when router recovers but all DNS are still down."""
+        current_time = int(time.time())
+        old_alert = current_time - 1000  # 1000 seconds ago, backoff is 900
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 900,
+            "messages": {"ispDown": "All DNS resolvers failed - ISP may be down"},
+            "routerCheck": {},
+            "dnsChecks": [
+                {"name": "DNS1", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"},
+                {"name": "DNS2", "server": "1.1.1.1", "qname": "cloudflare.com", "rrtype": "A"},
+                {"name": "DNS3", "server": "9.9.9.9", "qname": "quad9.net", "rrtype": "A"}
+            ]
+        }
+        mock_load_state.return_value = {
+            "failStreak": 4,
+            "downNotified": True,
+            "lastAlertTs": old_alert,
+            "lastStatus": "routerDown",
+            "lastFailedDns": []
+        }
+        mock_check_router.return_value = True  # Router recovered
+        # All DNS still down
+        mock_check_dns.return_value = (["DNS1", "DNS2", "DNS3"], ["DNS1", "DNS2", "DNS3"])
+        
+        memon.main()
+        
+        # Verify ispDown alert was emitted (routerDown → ispDown transition)
+        mock_emit.assert_called_once()
+        call_args = mock_emit.call_args[0][0]
+        self.assertEqual(call_args, "All DNS resolvers failed - ISP may be down")
+        # Verify state was saved
+        mock_save_state.assert_called_once()
+        saved_state = mock_save_state.call_args[0][0]
+        self.assertEqual(saved_state["lastStatus"], "ispDown")
+        self.assertEqual(saved_state["lastFailedDns"], ["DNS1", "DNS2", "DNS3"])
+    
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.load_config')
+    @patch('memon.check_router')
+    @patch('memon.check_all_dns')
+    @patch('memon.emit_alert')
+    def test_main_router_recovery_partial_dns_recovery(self, mock_emit, mock_check_dns, mock_check_router,
+                                                       mock_load_config, mock_load_state, mock_save_state):
+        """Test main function when router recovers and some DNS recover (2 of 3 DNS still down)."""
+        current_time = int(time.time())
+        old_alert = current_time - 1000  # 1000 seconds ago, backoff is 900
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 900,
+            "messages": {"upstreamDnsDown": "DNS resolvers failed: {{failed}}"},
+            "routerCheck": {},
+            "dnsChecks": [
+                {"name": "DNS1", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"},
+                {"name": "DNS2", "server": "1.1.1.1", "qname": "cloudflare.com", "rrtype": "A"},
+                {"name": "DNS3", "server": "9.9.9.9", "qname": "quad9.net", "rrtype": "A"}
+            ]
+        }
+        mock_load_state.return_value = {
+            "failStreak": 4,
+            "downNotified": True,
+            "lastAlertTs": old_alert,
+            "lastStatus": "routerDown",
+            "lastFailedDns": []
+        }
+        mock_check_router.return_value = True  # Router recovered
+        # 2 of 3 DNS still down (1 recovered)
+        mock_check_dns.return_value = (["DNS1", "DNS2"], ["DNS1", "DNS2", "DNS3"])
+        
+        memon.main()
+        
+        # Verify upstreamDnsDown alert was emitted (routerDown → upstreamDnsDown transition)
+        mock_emit.assert_called_once()
+        call_args = mock_emit.call_args[0][0]
+        self.assertIn("DNS1", call_args)
+        self.assertIn("DNS2", call_args)
+        self.assertNotIn("DNS3", call_args)
+        # Verify state was saved
+        mock_save_state.assert_called_once()
+        saved_state = mock_save_state.call_args[0][0]
+        self.assertEqual(saved_state["lastStatus"], "upstreamDnsDown")
+        self.assertEqual(saved_state["lastFailedDns"], ["DNS1", "DNS2"])
 
 
 class TestEmitAlert(unittest.TestCase):

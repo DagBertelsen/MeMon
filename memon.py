@@ -49,7 +49,8 @@ DEFAULT_STATE = {
     "failStreak": 0,
     "downNotified": False,
     "lastAlertTs": 0,
-    "lastStatus": None
+    "lastStatus": None,
+    "lastFailedDns": []
 }
 
 # MeshMonitor hard timeout limit (seconds)
@@ -416,32 +417,51 @@ def should_fire_up_alert(all_ok: bool, down_notified: bool) -> bool:
 
 
 def should_fire_partial_recovery_alert(last_status: Optional[str], current_status: Optional[str],
-                                       down_notified: bool, last_alert_ts: int, backoff_seconds: int) -> bool:
+                                       down_notified: bool, last_failed_dns: List[str],
+                                       current_failed_dns: List[str]) -> bool:
     """
-    Check if partial recovery alert should fire (ispDown → upstreamDnsDown).
+    Check if partial recovery alert should fire.
+    
+    Handles scenarios:
+    1. routerDown → ispDown (router recovered, all DNS failed)
+    2. routerDown → upstreamDnsDown (router recovered, some DNS failed)
+    3. ispDown → upstreamDnsDown (all DNS failed → some DNS recovered)
+    4. upstreamDnsDown → upstreamDnsDown with fewer failures (some DNS recovered)
+    
+    Recovery notifications bypass backoff period.
     
     Args:
         last_status: Previous status classification
         current_status: Current status classification
         down_notified: Whether down alert was previously sent
-        last_alert_ts: Timestamp of last alert
-        backoff_seconds: Backoff period in seconds
+        last_failed_dns: List of DNS resolver names that failed previously
+        current_failed_dns: List of DNS resolver names that are currently failing
         
     Returns:
         True if partial recovery alert should fire
     """
-    if last_status != "ispDown":
-        return False
-    if current_status != "upstreamDnsDown":
-        return False
     if not down_notified:
         return False
-    # Check backoff
-    current_time = int(time.time())
-    time_since_last = current_time - last_alert_ts
-    if time_since_last < backoff_seconds:
+    
+    # Scenario 1 & 2: routerDown → ispDown or upstreamDnsDown
+    if last_status == "routerDown":
+        if current_status == "ispDown" or current_status == "upstreamDnsDown":
+            return True
+    
+    if current_status != "upstreamDnsDown":
         return False
-    return True
+    
+    # Scenario 3: ispDown → upstreamDnsDown
+    if last_status == "ispDown":
+        return True
+    
+    # Scenario 4: upstreamDnsDown → upstreamDnsDown with fewer failures
+    if last_status == "upstreamDnsDown":
+        # Check if fewer DNS are failing now than before
+        if len(current_failed_dns) < len(last_failed_dns):
+            return True
+    
+    return False
 
 
 def emit_alert(message: str) -> None:
@@ -499,6 +519,7 @@ def main() -> None:
     down_notified = state.get("downNotified", False)
     last_alert_ts = state.get("lastAlertTs", 0)
     last_status = state.get("lastStatus", None)
+    last_failed_dns = state.get("lastFailedDns", [])
     
     # Validate required commands are available
     router_check_type = router_check.get("type", "https").lower()
@@ -547,7 +568,7 @@ def main() -> None:
                                        last_alert_ts, backoff_seconds)
     fire_up = should_fire_up_alert(all_ok, down_notified)
     fire_partial_recovery = should_fire_partial_recovery_alert(last_status, status, down_notified,
-                                                                last_alert_ts, backoff_seconds)
+                                                                last_failed_dns, failed_dns)
     
     # Emit alerts and update state
     if fire_down:
@@ -573,9 +594,12 @@ def main() -> None:
         last_alert_ts = int(time.time())
     
     elif fire_partial_recovery:
-        # Partial recovery: ispDown → upstreamDnsDown
-        template = messages.get("upstreamDnsDown", "DNS resolvers failed: {{failed}}")
-        message = replace_placeholders(template, failed_dns)
+        # Partial recovery: routerDown → ispDown/upstreamDnsDown, or ispDown → upstreamDnsDown
+        if status == "ispDown":
+            message = messages.get("ispDown", "All DNS resolvers failed - ISP may be down")
+        else:  # upstreamDnsDown
+            template = messages.get("upstreamDnsDown", "DNS resolvers failed: {{failed}}")
+            message = replace_placeholders(template, failed_dns)
         emit_alert(message)
         last_alert_ts = int(time.time())
     
@@ -584,6 +608,7 @@ def main() -> None:
     state["downNotified"] = down_notified
     state["lastAlertTs"] = last_alert_ts
     state["lastStatus"] = status
+    state["lastFailedDns"] = failed_dns
     save_state(state)
 
 
