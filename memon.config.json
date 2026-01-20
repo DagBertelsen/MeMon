@@ -10,16 +10,15 @@
   },
   "routerCheck": {
     "type": "https",
-    "url": "https://192.168.1.1",
+    "host": "https://192.168.1.1",
     "insecureTls": true,
-    "host": "192.168.1.1",
     "pingCount": 1
   },
   "dnsChecks": [
     {
       "name": "Altibox",
-      "server": "8.8.8.8",
-      "qname": "google.com",
+      "server": "109.247.114.4",
+      "qname": "altibox.no",
       "rrtype": "A"
     },
     {

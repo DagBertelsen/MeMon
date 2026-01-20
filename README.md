@@ -80,9 +80,8 @@ The script uses `memon.config.json` for all configuration. If the file doesn't e
   },
   "routerCheck": {
     "type": "https|ping",
-    "url": "https://192.168.1.1",
+    "host": "https://192.168.1.1",
     "insecureTls": false,
-    "host": "192.168.1.1",
     "pingCount": 1
   },
   "dnsChecks": [
@@ -120,9 +119,10 @@ Customize alert messages for different failure scenarios:
 Configure how the script checks router connectivity:
 
 - **`type`** (string, required): `"https"` or `"ping"`
-- **`url`** (string, required for HTTPS): Router HTTPS URL (e.g., `"https://192.168.1.1"`)
-- **`insecureTls`** (boolean, default: false): If `true`, disables TLS certificate validation (useful for routers with self-signed certificates)
-- **`host`** (string, required for PING): Router hostname or IP address
+- **`host`** (string, required): Router hostname, IP address, or full URL
+  - For `type: "https"`: Can be a full URL (e.g., `"https://192.168.1.1"`) or just hostname/IP (will auto-prepend `https://`)
+  - For `type: "ping"`: Hostname or IP address (protocol prefix will be stripped if present)
+- **`insecureTls`** (boolean, default: false): If `true`, disables TLS certificate validation (useful for routers with self-signed certificates). Only used when `type` is `"https"`.
 - **`pingCount`** (integer, default: 1): Number of ping packets to send (only used when `type` is `"ping"`)
 
 #### DNS Checks
@@ -151,10 +151,8 @@ Array of DNS resolver checks to perform:
   },
   "routerCheck": {
     "type": "https",
-    "url": "https://192.168.1.1",
-    "insecureTls": true,
-    "host": "192.168.1.1",
-    "pingCount": 1
+    "host": "https://192.168.1.1",
+    "insecureTls": true
   },
   "dnsChecks": [
     {
@@ -345,7 +343,7 @@ The script ensures total execution time stays under 10 seconds (MeshMonitor hard
 **Solutions**:
 - Set `"insecureTls": true` in router check configuration
 - Try PING check instead: `"type": "ping"`
-- Verify router URL is correct and accessible from browser
+- Verify router host/URL is correct and accessible from browser
 
 ### Script Times Out
 

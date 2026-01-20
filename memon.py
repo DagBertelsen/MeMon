@@ -36,9 +36,8 @@ DEFAULT_CONFIG = {
     },
     "routerCheck": {
         "type": "https",
-        "url": "https://192.168.1.1",
+        "host": "https://192.168.1.1",
         "insecureTls": False,
-        "host": "192.168.1.1",
         "pingCount": 1
     },
     "dnsChecks": []
@@ -213,10 +212,20 @@ def check_router(router_check: Dict[str, Any], timeout_ms: int) -> bool:
     
     if check_type == "ping":
         host = router_check.get("host", "192.168.1.1")
+        # Strip protocol prefix if present (e.g., "https://192.168.1.1" -> "192.168.1.1")
+        if host.startswith("http://"):
+            host = host[7:]
+        elif host.startswith("https://"):
+            host = host[8:]
         count = router_check.get("pingCount", 1)
         return check_router_ping(host, count, timeout_ms)
     else:  # default to https
-        url = router_check.get("url", "https://192.168.1.1")
+        host = router_check.get("host", "192.168.1.1")
+        # If host doesn't start with http:// or https://, prepend https://
+        if not host.startswith("http://") and not host.startswith("https://"):
+            url = "https://" + host
+        else:
+            url = host
         insecure_tls = router_check.get("insecureTls", False)
         return check_router_https(url, insecure_tls, timeout_ms)
 

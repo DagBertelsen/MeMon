@@ -163,7 +163,7 @@ class TestRouterChecks(unittest.TestCase):
     def test_check_router_https_type(self, mock_https):
         """Test router check with HTTPS type."""
         mock_https.return_value = True
-        router_check = {"type": "https", "url": "https://192.168.1.1", "insecureTls": False}
+        router_check = {"type": "https", "host": "https://192.168.1.1", "insecureTls": False}
         
         result = memon.check_router(router_check, 2500)
         self.assertTrue(result)
@@ -178,6 +178,56 @@ class TestRouterChecks(unittest.TestCase):
         result = memon.check_router(router_check, 2500)
         self.assertTrue(result)
         mock_ping.assert_called_once()
+    
+    @patch('memon.check_router_https')
+    def test_check_router_https_host_without_protocol(self, mock_https):
+        """Test HTTPS router check with host that doesn't have protocol (should prepend https://)."""
+        mock_https.return_value = True
+        router_check = {"type": "https", "host": "192.168.1.1", "insecureTls": False}
+        
+        result = memon.check_router(router_check, 2500)
+        self.assertTrue(result)
+        mock_https.assert_called_once_with("https://192.168.1.1", False, 2500)
+    
+    @patch('memon.check_router_https')
+    def test_check_router_https_host_with_https_protocol(self, mock_https):
+        """Test HTTPS router check with host that has https:// protocol."""
+        mock_https.return_value = True
+        router_check = {"type": "https", "host": "https://192.168.1.1", "insecureTls": False}
+        
+        result = memon.check_router(router_check, 2500)
+        self.assertTrue(result)
+        mock_https.assert_called_once_with("https://192.168.1.1", False, 2500)
+    
+    @patch('memon.check_router_https')
+    def test_check_router_https_host_with_http_protocol(self, mock_https):
+        """Test HTTPS router check with host that has http:// protocol."""
+        mock_https.return_value = True
+        router_check = {"type": "https", "host": "http://192.168.1.1", "insecureTls": False}
+        
+        result = memon.check_router(router_check, 2500)
+        self.assertTrue(result)
+        mock_https.assert_called_once_with("http://192.168.1.1", False, 2500)
+    
+    @patch('memon.check_router_ping')
+    def test_check_router_ping_host_with_protocol(self, mock_ping):
+        """Test PING router check with host that has protocol prefix (should strip it)."""
+        mock_ping.return_value = True
+        router_check = {"type": "ping", "host": "https://192.168.1.1", "pingCount": 1}
+        
+        result = memon.check_router(router_check, 2500)
+        self.assertTrue(result)
+        mock_ping.assert_called_once_with("192.168.1.1", 1, 2500)
+    
+    @patch('memon.check_router_ping')
+    def test_check_router_ping_host_with_http_protocol(self, mock_ping):
+        """Test PING router check with host that has http:// protocol prefix (should strip it)."""
+        mock_ping.return_value = True
+        router_check = {"type": "ping", "host": "http://192.168.1.1", "pingCount": 1}
+        
+        result = memon.check_router(router_check, 2500)
+        self.assertTrue(result)
+        mock_ping.assert_called_once_with("192.168.1.1", 1, 2500)
 
 
 class TestDNSChecks(unittest.TestCase):
