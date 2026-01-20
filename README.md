@@ -444,19 +444,17 @@ The project includes a comprehensive test suite using Python's `unittest` framew
 
 **Run all tests:**
 ```bash
-python -m unittest memon.test
+python memon.test.py
 ```
 
 **Run tests with verbose output:**
 ```bash
-python -m unittest memon.test -v
+python memon.test.py -v
 ```
 
-**Using Make (if available):**
+**Alternative (using unittest discovery):**
 ```bash
-make test          # Run tests
-make test-verbose  # Run tests with verbose output
-make lint          # Run all lint checks
+python -m unittest discover -s . -p "*.test.py"
 ```
 
 ### Automated Testing
@@ -464,7 +462,7 @@ make lint          # Run all lint checks
 This project includes automated testing that runs on every commit:
 
 - **GitHub Actions**: Tests run automatically on push and pull requests across multiple Python versions (3.7-3.12) and operating systems (Ubuntu, Windows, macOS)
-- **Pre-commit Hooks**: Local tests run before each commit (optional, install with `make install-hooks`)
+- **Pre-commit Hooks**: Local tests run before each commit (optional, install with `pip install pre-commit && pre-commit install`)
 
 ### Test Coverage
 
@@ -486,7 +484,7 @@ The test suite covers:
 Found a bug or have a feature request? Please file an issue on the MeshMonitor GitHub repository.
 
 **Before submitting changes:**
-1. Run the test suite: `python -m unittest memon.test -v`
+1. Run the test suite: `python memon.test.py -v`
 2. Ensure all tests pass
 3. Verify script syntax: `python -m py_compile memon.py`
 4. Check that the `mm_meta` block is present in `memon.py`
