@@ -12,6 +12,7 @@ This script continuously monitors your network infrastructure:
   - Failures reach a configurable threshold (`mustFailCount`)
   - Backoff period has elapsed (prevents alert spam)
   - Network recovers after being down
+  - Partial recovery occurs (router recovers but DNS issues remain, or DNS partially recovers)
 
 The script uses failure streak tracking to distinguish between transient network hiccups and real outages, ensuring you only get notified when action is needed.
 
@@ -259,6 +260,10 @@ The script path in MeshMonitor should be:
 7. **Evaluate Alerts**:
    - **DOWN alert fires when**: `failStreak >= mustFailCount` AND `downNotified == false` AND backoff elapsed
    - **UP alert fires when**: All checks pass AND `downNotified == true`
+   - **Partial Recovery alert fires when**: Network partially recovers (bypasses backoff):
+     - Router recovers but DNS issues remain (routerDown → ispDown/upstreamDnsDown)
+     - All DNS failed → some DNS recovered (ispDown → upstreamDnsDown)
+     - Some DNS recovered (upstreamDnsDown → upstreamDnsDown with fewer failures)
 8. **Output**: Emits JSON to stdout only when alert fires, otherwise exits silently
 
 ### State Management
@@ -268,8 +273,10 @@ The script maintains state in `memon.state.json`:
 - **`failStreak`**: Current consecutive failure count
 - **`downNotified`**: Whether a DOWN alert was already sent
 - **`lastAlertTs`**: Timestamp of last alert (for backoff calculation)
+- **`lastStatus`**: Previous status classification (for partial recovery detection)
+- **`lastFailedDns`**: List of DNS resolver names that failed previously (for partial recovery detection)
 
-State is updated after each alert and persists between script runs.
+State is updated after each alert and persists between script runs. The script includes clock skew protection to handle system clock changes.
 
 ### Timeout Protection
 
@@ -277,7 +284,18 @@ The script ensures total execution time stays under 10 seconds (MeshMonitor hard
 
 - Individual checks respect `timeoutMs` per check
 - DNS checks run in parallel with overall timeout protection
+- Script includes a 0.5 second safety margin to ensure completion before MeshMonitor timeout
 - Script exits gracefully if time runs out
+
+### Partial Recovery Alerts
+
+The script detects and alerts on partial recovery scenarios, providing more granular status updates:
+
+- **Router Recovery with DNS Issues**: When router recovers but DNS problems persist, you'll get an alert indicating the current DNS status (all failed or partially failed)
+- **DNS Partial Recovery**: When all DNS resolvers were failing and some recover, you'll be notified of the improved (but still degraded) status
+- **Progressive DNS Recovery**: When some DNS resolvers recover (fewer failures than before), you'll get an update
+
+Partial recovery alerts bypass the backoff period, ensuring you're immediately notified of status improvements even during extended outages.
 
 ## Troubleshooting
 
@@ -297,7 +315,7 @@ The script ensures total execution time stays under 10 seconds (MeshMonitor hard
 
 **Possible Causes**:
 - Failure streak hasn't reached `mustFailCount` threshold
-- Backoff period hasn't elapsed since last alert
+- Backoff period hasn't elapsed since last alert (doesn't apply to partial recovery alerts)
 - Script is exiting before checks complete (timeout)
 
 **Solutions**:
