@@ -56,6 +56,12 @@ DEFAULT_STATE = {
 # MeshMonitor hard timeout limit (seconds)
 MESHMONITOR_TIMEOUT = 10
 
+# Safety margin for timeout calculations (seconds)
+TIMEOUT_SAFETY_MARGIN = 0.5
+
+# Maximum alert message length (characters)
+MAX_MESSAGE_LENGTH = 200
+
 
 def check_command_available(cmd: str) -> bool:
     """
@@ -160,20 +166,21 @@ def check_router_https(url: str, insecure_tls: bool, timeout_ms: int) -> bool:
     """
     try:
         # Create SSL context
-        ctx = ssl.create_default_context()
+        ssl_context = ssl.create_default_context()
         if insecure_tls:
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
         
         # Create request with timeout
         req = urllib.request.Request(url)
         timeout_sec = timeout_ms / 1000.0
         
-        with urllib.request.urlopen(req, context=ctx, timeout=timeout_sec) as response:
+        with urllib.request.urlopen(req, context=ssl_context, timeout=timeout_sec) as response:
             # Any 2xx or 3xx response is considered success
             return 200 <= response.getcode() < 400
     except (urllib.error.URLError, urllib.error.HTTPError, OSError, ssl.SSLError):
         return False
+    # Catch any other unexpected exceptions to prevent script crash
     except Exception:
         return False
 
@@ -209,8 +216,41 @@ def check_router_ping(host: str, count: int, timeout_ms: int) -> bool:
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return False
+    # Catch any other unexpected exceptions to prevent script crash
     except Exception:
         return False
+
+
+def _strip_protocol(host: str) -> str:
+    """
+    Strip protocol prefix from host string.
+    
+    Args:
+        host: Host string that may contain http:// or https:// prefix
+        
+    Returns:
+        Host string without protocol prefix
+    """
+    if host.startswith("http://"):
+        return host[7:]
+    elif host.startswith("https://"):
+        return host[8:]
+    return host
+
+
+def _normalize_url(host: str) -> str:
+    """
+    Normalize host to URL format, adding https:// if no protocol specified.
+    
+    Args:
+        host: Host string that may or may not have protocol prefix
+        
+    Returns:
+        URL string with protocol prefix
+    """
+    if not host.startswith("http://") and not host.startswith("https://"):
+        return "https://" + host
+    return host
 
 
 def check_router(router_check: Dict[str, Any], timeout_ms: int) -> bool:
@@ -228,20 +268,12 @@ def check_router(router_check: Dict[str, Any], timeout_ms: int) -> bool:
     
     if check_type == "ping":
         host = router_check.get("host", "192.168.1.1")
-        # Strip protocol prefix if present (e.g., "https://192.168.1.1" -> "192.168.1.1")
-        if host.startswith("http://"):
-            host = host[7:]
-        elif host.startswith("https://"):
-            host = host[8:]
+        host = _strip_protocol(host)
         count = router_check.get("pingCount", 1)
         return check_router_ping(host, count, timeout_ms)
     else:  # default to https
         host = router_check.get("host", "192.168.1.1")
-        # If host doesn't start with http:// or https://, prepend https://
-        if not host.startswith("http://") and not host.startswith("https://"):
-            url = "https://" + host
-        else:
-            url = host
+        url = _normalize_url(host)
         insecure_tls = router_check.get("insecureTls", False)
         return check_router_https(url, insecure_tls, timeout_ms)
 
@@ -286,6 +318,7 @@ def check_dns(server: str, qname: str, rrtype: str, timeout_ms: int) -> Tuple[bo
                 return True, ""
         except (subprocess.TimeoutExpired, FileNotFoundError):
             continue
+        # Catch any other unexpected exceptions to prevent script crash
         except Exception:
             continue
     
@@ -373,7 +406,7 @@ def classify_status(router_ok: bool, failed_dns: List[str], all_dns: List[str]) 
 
 
 def should_fire_down_alert(fail_streak: int, must_fail_count: int, down_notified: bool,
-                           last_alert_ts: int, backoff_seconds: int) -> bool:
+                           last_alert_ts: int, backoff_seconds: int, current_time: int) -> bool:
     """
     Check if DOWN alert should fire.
     
@@ -383,6 +416,7 @@ def should_fire_down_alert(fail_streak: int, must_fail_count: int, down_notified
         down_notified: Whether down alert was already sent
         last_alert_ts: Timestamp of last alert
         backoff_seconds: Backoff period in seconds
+        current_time: Current timestamp (to avoid multiple time.time() calls)
         
     Returns:
         True if DOWN alert should fire
@@ -394,7 +428,6 @@ def should_fire_down_alert(fail_streak: int, must_fail_count: int, down_notified
         return False
     
     # Check backoff
-    current_time = int(time.time())
     time_since_last = current_time - last_alert_ts
     if time_since_last < backoff_seconds:
         return False
@@ -469,11 +502,11 @@ def emit_alert(message: str) -> None:
     Output JSON alert to stdout.
     
     Args:
-        message: Alert message (max 200 chars per MeshMonitor requirement)
+        message: Alert message (max length per MeshMonitor requirement)
     """
-    # Truncate to 200 chars per MeshMonitor requirement
-    if len(message) > 200:
-        message = message[:197] + "..."
+    # Truncate to max length per MeshMonitor requirement
+    if len(message) > MAX_MESSAGE_LENGTH:
+        message = message[:MAX_MESSAGE_LENGTH - 3] + "..."
     
     output = {"response": message}
     print(json.dumps(output))
@@ -493,9 +526,52 @@ def replace_placeholders(template: str, failed_names: List[str]) -> str:
     """
     if "{{failed}}" in template:
         failed_str = ", ".join(failed_names)
-        template = template.replace("{{failed}}", failed_str)
+        return template.replace("{{failed}}", failed_str)
     
     return template
+
+
+def _format_alert_message(status: Optional[str], messages: Dict[str, str], failed_dns: List[str]) -> str:
+    """
+    Format alert message based on status and failed DNS resolvers.
+    
+    Args:
+        status: Current status classification
+        messages: Message templates dictionary
+        failed_dns: List of failed DNS resolver names
+        
+    Returns:
+        Formatted alert message
+    """
+    if status == "routerDown":
+        return messages.get("routerDown", "Router is down")
+    elif status == "ispDown":
+        return messages.get("ispDown", "All DNS resolvers failed - ISP may be down")
+    elif status == "upstreamDnsDown":
+        template = messages.get("upstreamDnsDown", "DNS resolvers failed: {{failed}}")
+        return replace_placeholders(template, failed_dns)
+    else:
+        return "Network issue detected"
+
+
+def _update_state(state: Dict[str, Any], fail_streak: int, down_notified: bool,
+                  last_alert_ts: int, status: Optional[str], failed_dns: List[str]) -> None:
+    """
+    Update state dictionary with current values.
+    
+    Args:
+        state: State dictionary to update
+        fail_streak: Current failure streak count
+        down_notified: Whether down alert was sent
+        last_alert_ts: Timestamp of last alert
+        status: Current status classification
+        failed_dns: List of failed DNS resolver names
+    """
+    state["failStreak"] = fail_streak
+    state["downNotified"] = down_notified
+    state["lastAlertTs"] = last_alert_ts
+    state["lastStatus"] = status
+    state["lastFailedDns"] = failed_dns
 
 
 def main() -> None:
@@ -503,6 +579,8 @@ def main() -> None:
     Main function: orchestrate checks and alert logic with timeout protection.
     """
     start_time = time.time()
+    # Cache current time to avoid multiple system calls and ensure consistency
+    current_time = int(time.time())
     
     # Load configuration
     config = load_config()
@@ -527,15 +605,17 @@ def main() -> None:
         if not check_command_available("ping"):
             print("Error: 'ping' command not found. Install it or use routerCheck.type='https'", file=sys.stderr)
             sys.exit(1)
+            return  # Early return when commands missing (for test compatibility)
     
     if dns_checks:
         if not check_command_available("dig") and not check_command_available("nslookup"):
             print("Error: Neither 'dig' nor 'nslookup' command found. Install at least one (e.g., 'sudo apt install bind9-dnsutils' on Debian/Ubuntu)", file=sys.stderr)
             sys.exit(1)
+            return  # Early return when commands missing (for test compatibility)
     
     # Calculate remaining time (ensure we finish before MeshMonitor timeout)
     elapsed = time.time() - start_time
-    remaining_time = MESHMONITOR_TIMEOUT - elapsed - 0.5  # 0.5s safety margin
+    remaining_time = MESHMONITOR_TIMEOUT - elapsed - TIMEOUT_SAFETY_MARGIN
     if remaining_time <= 0:
         # Already out of time, exit silently
         return
@@ -549,7 +629,7 @@ def main() -> None:
     if router_ok:
         # Check DNS with remaining time
         elapsed = time.time() - start_time
-        remaining_time = MESHMONITOR_TIMEOUT - elapsed - 0.5
+        remaining_time = MESHMONITOR_TIMEOUT - elapsed - TIMEOUT_SAFETY_MARGIN
         if remaining_time > 0:
             failed_dns, all_dns = check_all_dns(dns_checks, timeout_ms, remaining_time)
     
@@ -565,50 +645,32 @@ def main() -> None:
     
     # Determine if alerts should fire
     fire_down = should_fire_down_alert(fail_streak, must_fail_count, down_notified,
-                                       last_alert_ts, backoff_seconds)
+                                       last_alert_ts, backoff_seconds, current_time)
     fire_up = should_fire_up_alert(all_ok, down_notified)
     fire_partial_recovery = should_fire_partial_recovery_alert(last_status, status, down_notified,
                                                                 last_failed_dns, failed_dns)
     
     # Emit alerts and update state
     if fire_down:
-        # Get appropriate message
-        if status == "routerDown":
-            message = messages.get("routerDown", "Router is down")
-        elif status == "ispDown":
-            message = messages.get("ispDown", "All DNS resolvers failed - ISP may be down")
-        elif status == "upstreamDnsDown":
-            template = messages.get("upstreamDnsDown", "DNS resolvers failed: {{failed}}")
-            message = replace_placeholders(template, failed_dns)
-        else:
-            message = "Network issue detected"
-        
+        message = _format_alert_message(status, messages, failed_dns)
         emit_alert(message)
         down_notified = True
-        last_alert_ts = int(time.time())
+        last_alert_ts = current_time
     
     elif fire_up:
         message = messages.get("recovery", "Network connectivity restored")
         emit_alert(message)
         down_notified = False
-        last_alert_ts = int(time.time())
+        last_alert_ts = current_time
     
     elif fire_partial_recovery:
         # Partial recovery: routerDown → ispDown/upstreamDnsDown, or ispDown → upstreamDnsDown
-        if status == "ispDown":
-            message = messages.get("ispDown", "All DNS resolvers failed - ISP may be down")
-        else:  # upstreamDnsDown
-            template = messages.get("upstreamDnsDown", "DNS resolvers failed: {{failed}}")
-            message = replace_placeholders(template, failed_dns)
+        message = _format_alert_message(status, messages, failed_dns)
         emit_alert(message)
-        last_alert_ts = int(time.time())
+        last_alert_ts = current_time
     
     # Save updated state
-    state["failStreak"] = fail_streak
-    state["downNotified"] = down_notified
-    state["lastAlertTs"] = last_alert_ts
-    state["lastStatus"] = status
-    state["lastFailedDns"] = failed_dns
+    _update_state(state, fail_streak, down_notified, last_alert_ts, status, failed_dns)
     save_state(state)
 
 

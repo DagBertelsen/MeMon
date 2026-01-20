@@ -340,34 +340,40 @@ class TestAlertLogic(unittest.TestCase):
     
     def test_should_fire_down_alert_meets_threshold(self):
         """Test DOWN alert fires when threshold is met."""
+        current_time = int(time.time())
         result = memon.should_fire_down_alert(
             fail_streak=3,
             must_fail_count=3,
             down_notified=False,
             last_alert_ts=0,
-            backoff_seconds=900
+            backoff_seconds=900,
+            current_time=current_time
         )
         self.assertTrue(result)
     
     def test_should_fire_down_alert_below_threshold(self):
         """Test DOWN alert doesn't fire when below threshold."""
+        current_time = int(time.time())
         result = memon.should_fire_down_alert(
             fail_streak=2,
             must_fail_count=3,
             down_notified=False,
             last_alert_ts=0,
-            backoff_seconds=900
+            backoff_seconds=900,
+            current_time=current_time
         )
         self.assertFalse(result)
     
     def test_should_fire_down_alert_already_notified(self):
         """Test DOWN alert doesn't fire if already notified."""
+        current_time = int(time.time())
         result = memon.should_fire_down_alert(
             fail_streak=3,
             must_fail_count=3,
             down_notified=True,
             last_alert_ts=0,
-            backoff_seconds=900
+            backoff_seconds=900,
+            current_time=current_time
         )
         self.assertFalse(result)
     
@@ -380,7 +386,8 @@ class TestAlertLogic(unittest.TestCase):
             must_fail_count=3,
             down_notified=False,
             last_alert_ts=recent_alert,
-            backoff_seconds=900
+            backoff_seconds=900,
+            current_time=current_time
         )
         self.assertFalse(result)
     
