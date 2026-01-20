@@ -1,0 +1,38 @@
+{
+  "timeoutMs": 2500,
+  "mustFailCount": 3,
+  "alertBackoffSeconds": 900,
+  "messages": {
+    "routerDown": "Router is down",
+    "ispDown": "All DNS resolvers failed - ISP may be down",
+    "upstreamDnsDown": "DNS resolvers failed: {{failed}}",
+    "recovery": "Network connectivity restored"
+  },
+  "routerCheck": {
+    "type": "https",
+    "url": "https://192.168.1.1",
+    "insecureTls": true,
+    "host": "192.168.1.1",
+    "pingCount": 1
+  },
+  "dnsChecks": [
+    {
+      "name": "Altibox",
+      "server": "8.8.8.8",
+      "qname": "google.com",
+      "rrtype": "A"
+    },
+    {
+      "name": "Google",
+      "server": "8.8.8.8",
+      "qname": "google.com",
+      "rrtype": "A"
+    },
+    {
+      "name": "Cloudflare",
+      "server": "1.1.1.1",
+      "qname": "cloudflare.com",
+      "rrtype": "A"
+    }
+  ]
+}

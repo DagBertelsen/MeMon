@@ -1,0 +1,53 @@
+name: Run Tests
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.7', '3.8', '3.9', '3.10', '3.11', '3.12']
+        exclude:
+          # Windows and macOS may not have dig/nslookup, but we test the fallback logic
+          - os: windows-latest
+            python-version: '3.7'
+          - os: macos-latest
+            python-version: '3.7'
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install system dependencies (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y dnsutils
+
+    - name: Install system dependencies (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        # dig and nslookup should be available by default on macOS
+
+    - name: Run tests
+      run: |
+        python -m unittest memon.test -v
+
+    - name: Verify script syntax
+      run: |
+        python -m py_compile memon.py
+
+    - name: Check script has mm_meta block
+      run: |
+        head -n 5 memon.py | grep -q "mm_meta" || (echo "Missing mm_meta block" && exit 1)

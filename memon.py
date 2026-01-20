@@ -1,0 +1,515 @@
+#!/usr/bin/env python3
+# mm_meta:
+#   name: memon
+#   emoji: 🌐
+#   language: Python
+
+"""
+memon Auto-Responder Script for MeshMonitor
+
+Monitors router and DNS health, outputs JSON alerts only when notifications should fire.
+Implements failure streak tracking with backoff logic.
+"""
+
+import json
+import os
+import sys
+import subprocess
+import time
+import ssl
+import urllib.request
+import urllib.error
+from typing import Dict, List, Optional, Tuple, Any
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+
+
+# Default configuration values
+DEFAULT_CONFIG = {
+    "timeoutMs": 2500,
+    "mustFailCount": 3,
+    "alertBackoffSeconds": 900,
+    "messages": {
+        "routerDown": "Router is down",
+        "ispDown": "All DNS resolvers failed - ISP may be down",
+        "upstreamDnsDown": "DNS resolvers failed: {{failed}}",
+        "recovery": "Network connectivity restored"
+    },
+    "routerCheck": {
+        "type": "https",
+        "url": "https://192.168.1.1",
+        "insecureTls": False,
+        "host": "192.168.1.1",
+        "pingCount": 1
+    },
+    "dnsChecks": []
+}
+
+# Default state values
+DEFAULT_STATE = {
+    "failStreak": 0,
+    "downNotified": False,
+    "lastAlertTs": 0
+}
+
+# MeshMonitor hard timeout limit (seconds)
+MESHMONITOR_TIMEOUT = 10
+
+
+def load_config(config_path: str = "memon.config.json") -> Dict[str, Any]:
+    """
+    Load and validate configuration file with defaults.
+    
+    Args:
+        config_path: Path to configuration JSON file
+        
+    Returns:
+        Configuration dictionary with defaults applied
+        
+    Raises:
+        SystemExit: If config file exists but is invalid (exits with stderr only)
+    """
+    config = DEFAULT_CONFIG.copy()
+    
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                user_config = json.load(f)
+                # Deep merge defaults with user config
+                config.update(user_config)
+                if "messages" in user_config:
+                    config["messages"].update(user_config["messages"])
+                if "routerCheck" in user_config:
+                    config["routerCheck"].update(user_config["routerCheck"])
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Error loading config file {config_path}: {e}", file=sys.stderr)
+            sys.exit(1)
+    
+    return config
+
+
+def load_state(state_path: str = "memon.state.json") -> Dict[str, Any]:
+    """
+    Load state file or create default state if missing.
+    
+    Args:
+        state_path: Path to state JSON file
+        
+    Returns:
+        State dictionary with defaults applied
+    """
+    state = DEFAULT_STATE.copy()
+    
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, 'r', encoding='utf-8') as f:
+                user_state = json.load(f)
+                state.update(user_state)
+                
+                # Clamp lastAlertTs if in future (clock skew protection)
+                current_time = int(time.time())
+                if state.get("lastAlertTs", 0) > current_time:
+                    state["lastAlertTs"] = current_time
+        except (json.JSONDecodeError, IOError):
+            # If state file is corrupted, use defaults
+            pass
+    
+    return state
+
+
+def save_state(state: Dict[str, Any], state_path: str = "memon.state.json") -> None:
+    """
+    Write state to JSON file.
+    
+    Args:
+        state: State dictionary to save
+        state_path: Path to state JSON file
+    """
+    try:
+        with open(state_path, 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=2)
+    except IOError as e:
+        print(f"Error saving state file {state_path}: {e}", file=sys.stderr)
+
+
+def check_router_https(url: str, insecure_tls: bool, timeout_ms: int) -> bool:
+    """
+    Check router via HTTPS request.
+    
+    Args:
+        url: HTTPS URL to check
+        insecure_tls: If True, disable TLS certificate validation
+        timeout_ms: Request timeout in milliseconds
+        
+    Returns:
+        True if router responds successfully, False otherwise
+    """
+    try:
+        # Create SSL context
+        ctx = ssl.create_default_context()
+        if insecure_tls:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        
+        # Create request with timeout
+        req = urllib.request.Request(url)
+        timeout_sec = timeout_ms / 1000.0
+        
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout_sec) as response:
+            # Any 2xx or 3xx response is considered success
+            return 200 <= response.getcode() < 400
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ssl.SSLError):
+        return False
+    except Exception:
+        return False
+
+
+def check_router_ping(host: str, count: int, timeout_ms: int) -> bool:
+    """
+    Check router via ping command.
+    
+    Args:
+        host: Hostname or IP address to ping
+        count: Number of ping packets to send
+        timeout_ms: Timeout in milliseconds (per packet)
+        
+    Returns:
+        True if ping succeeds, False otherwise
+    """
+    try:
+        # Determine ping command based on OS
+        if sys.platform.startswith('win'):
+            # Windows: ping -n count -w timeout_ms host
+            cmd = ['ping', '-n', str(count), '-w', str(timeout_ms), host]
+        else:
+            # Unix/Linux: ping -c count -W timeout_sec host
+            timeout_sec = max(1, timeout_ms // 1000)
+            cmd = ['ping', '-c', str(count), '-W', str(timeout_sec), host]
+        
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=(timeout_ms * count) / 1000.0 + 1
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+    except Exception:
+        return False
+
+
+def check_router(router_check: Dict[str, Any], timeout_ms: int) -> bool:
+    """
+    Perform router check (HTTPS or PING).
+    
+    Args:
+        router_check: Router check configuration
+        timeout_ms: Timeout in milliseconds
+        
+    Returns:
+        True if router check passes, False otherwise
+    """
+    check_type = router_check.get("type", "https").lower()
+    
+    if check_type == "ping":
+        host = router_check.get("host", "192.168.1.1")
+        count = router_check.get("pingCount", 1)
+        return check_router_ping(host, count, timeout_ms)
+    else:  # default to https
+        url = router_check.get("url", "https://192.168.1.1")
+        insecure_tls = router_check.get("insecureTls", False)
+        return check_router_https(url, insecure_tls, timeout_ms)
+
+
+def check_dns(server: str, qname: str, rrtype: str, timeout_ms: int) -> Tuple[bool, str]:
+    """
+    Check single DNS resolver using subprocess (nslookup or dig).
+    
+    Args:
+        server: DNS server IP address
+        qname: Query name (domain to resolve)
+        rrtype: Record type (A or AAAA)
+        timeout_ms: Timeout in milliseconds
+        
+    Returns:
+        Tuple of (success: bool, name: str for error reporting)
+    """
+    timeout_sec = max(1, timeout_ms // 1000)
+    
+    # Try dig first (more reliable), fall back to nslookup
+    for cmd_type in ['dig', 'nslookup']:
+        try:
+            if cmd_type == 'dig':
+                # dig @server -t rrtype qname +short +timeout=timeout_sec
+                cmd = ['dig', f'@{server}', '-t', rrtype, qname, '+short', f'+timeout={timeout_sec}']
+            else:  # nslookup
+                # nslookup -type=rrtype qname server
+                if sys.platform.startswith('win'):
+                    cmd = ['nslookup', '-type=' + rrtype, qname, server]
+                else:
+                    cmd = ['nslookup', '-type=' + rrtype, qname, server]
+            
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout_sec + 1,
+                text=True
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                return True, ""
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            continue
+        except Exception:
+            continue
+    
+    return False, ""
+
+
+def check_all_dns(dns_checks: List[Dict[str, Any]], timeout_ms: int, max_total_time: float) -> Tuple[List[str], List[str]]:
+    """
+    Check all DNS resolvers in parallel (with timeout protection).
+    
+    Args:
+        dns_checks: List of DNS check configurations
+        timeout_ms: Timeout per DNS check in milliseconds
+        max_total_time: Maximum total time allowed (seconds)
+        
+    Returns:
+        Tuple of (failed_names: List[str], all_names: List[str])
+    """
+    if not dns_checks:
+        return [], []
+    
+    failed_names = []
+    all_names = [check.get("name", f"DNS-{i}") for i, check in enumerate(dns_checks)]
+    
+    start_time = time.time()
+    
+    # Use ThreadPoolExecutor for parallel DNS checks
+    with ThreadPoolExecutor(max_workers=len(dns_checks)) as executor:
+        futures = {}
+        for check in dns_checks:
+            server = check.get("server", "8.8.8.8")
+            qname = check.get("qname", "google.com")
+            rrtype = check.get("rrtype", "A")
+            name = check.get("name", "Unknown")
+            
+            future = executor.submit(check_dns, server, qname, rrtype, timeout_ms)
+            futures[future] = name
+        
+        # Wait for all with overall timeout protection
+        for future in futures:
+            elapsed = time.time() - start_time
+            remaining_time = max_total_time - elapsed
+            if remaining_time <= 0:
+                # Out of time, mark remaining as failed
+                failed_names.append(futures[future])
+                continue
+            
+            try:
+                success, _ = future.result(timeout=min(remaining_time, timeout_ms / 1000.0 + 0.5))
+                if not success:
+                    failed_names.append(futures[future])
+            except (FutureTimeoutError, Exception):
+                failed_names.append(futures[future])
+    
+    return failed_names, all_names
+
+
+def classify_status(router_ok: bool, failed_dns: List[str], all_dns: List[str]) -> Optional[str]:
+    """
+    Determine status classification.
+    
+    Args:
+        router_ok: Whether router check passed
+        failed_dns: List of failed DNS resolver names
+        all_dns: List of all DNS resolver names
+        
+    Returns:
+        Status classification string or None if all OK
+    """
+    if not router_ok:
+        return "routerDown"
+    
+    if not all_dns:
+        return None  # No DNS checks configured, all OK
+    
+    num_failed = len(failed_dns)
+    num_total = len(all_dns)
+    
+    if num_failed == num_total:
+        return "ispDown"
+    elif num_failed > 0:
+        return "upstreamDnsDown"
+    else:
+        return None  # All OK
+
+
+def should_fire_down_alert(fail_streak: int, must_fail_count: int, down_notified: bool,
+                           last_alert_ts: int, backoff_seconds: int) -> bool:
+    """
+    Check if DOWN alert should fire.
+    
+    Args:
+        fail_streak: Current failure streak count
+        must_fail_count: Required failures before alerting
+        down_notified: Whether down alert was already sent
+        last_alert_ts: Timestamp of last alert
+        backoff_seconds: Backoff period in seconds
+        
+    Returns:
+        True if DOWN alert should fire
+    """
+    if fail_streak < must_fail_count:
+        return False
+    
+    if down_notified:
+        return False
+    
+    # Check backoff
+    current_time = int(time.time())
+    time_since_last = current_time - last_alert_ts
+    if time_since_last < backoff_seconds:
+        return False
+    
+    return True
+
+
+def should_fire_up_alert(all_ok: bool, down_notified: bool) -> bool:
+    """
+    Check if UP alert should fire.
+    
+    Args:
+        all_ok: Whether all checks passed
+        down_notified: Whether down alert was previously sent
+        
+    Returns:
+        True if UP alert should fire
+    """
+    return all_ok and down_notified
+
+
+def emit_alert(message: str) -> None:
+    """
+    Output JSON alert to stdout.
+    
+    Args:
+        message: Alert message (max 200 chars per MeshMonitor requirement)
+    """
+    # Truncate to 200 chars per MeshMonitor requirement
+    if len(message) > 200:
+        message = message[:197] + "..."
+    
+    output = {"response": message}
+    print(json.dumps(output))
+    sys.stdout.flush()
+
+
+def replace_placeholders(template: str, failed_names: List[str]) -> str:
+    """
+    Replace placeholders in message template.
+    
+    Args:
+        template: Message template with {{failed}} placeholder
+        failed_names: List of failed DNS resolver names
+        
+    Returns:
+        Message with placeholders replaced
+    """
+    if "{{failed}}" in template:
+        failed_str = ", ".join(failed_names)
+        template = template.replace("{{failed}}", failed_str)
+    
+    return template
+
+
+def main() -> None:
+    """
+    Main function: orchestrate checks and alert logic with timeout protection.
+    """
+    start_time = time.time()
+    
+    # Load configuration
+    config = load_config()
+    timeout_ms = config.get("timeoutMs", 2500)
+    must_fail_count = config.get("mustFailCount", 3)
+    backoff_seconds = config.get("alertBackoffSeconds", 900)
+    messages = config.get("messages", {})
+    router_check = config.get("routerCheck", {})
+    dns_checks = config.get("dnsChecks", [])
+    
+    # Load state
+    state = load_state()
+    fail_streak = state.get("failStreak", 0)
+    down_notified = state.get("downNotified", False)
+    last_alert_ts = state.get("lastAlertTs", 0)
+    
+    # Calculate remaining time (ensure we finish before MeshMonitor timeout)
+    elapsed = time.time() - start_time
+    remaining_time = MESHMONITOR_TIMEOUT - elapsed - 0.5  # 0.5s safety margin
+    if remaining_time <= 0:
+        # Already out of time, exit silently
+        return
+    
+    # Check router first
+    router_ok = check_router(router_check, timeout_ms)
+    
+    # If router is down, skip DNS checks
+    failed_dns = []
+    all_dns = []
+    if router_ok:
+        # Check DNS with remaining time
+        elapsed = time.time() - start_time
+        remaining_time = MESHMONITOR_TIMEOUT - elapsed - 0.5
+        if remaining_time > 0:
+            failed_dns, all_dns = check_all_dns(dns_checks, timeout_ms, remaining_time)
+    
+    # Classify status
+    status = classify_status(router_ok, failed_dns, all_dns)
+    all_ok = (status is None)
+    
+    # Update failure streak
+    if all_ok:
+        fail_streak = 0
+    else:
+        fail_streak += 1
+    
+    # Determine if alerts should fire
+    fire_down = should_fire_down_alert(fail_streak, must_fail_count, down_notified,
+                                       last_alert_ts, backoff_seconds)
+    fire_up = should_fire_up_alert(all_ok, down_notified)
+    
+    # Emit alerts and update state
+    if fire_down:
+        # Get appropriate message
+        if status == "routerDown":
+            message = messages.get("routerDown", "Router is down")
+        elif status == "ispDown":
+            message = messages.get("ispDown", "All DNS resolvers failed - ISP may be down")
+        elif status == "upstreamDnsDown":
+            template = messages.get("upstreamDnsDown", "DNS resolvers failed: {{failed}}")
+            message = replace_placeholders(template, failed_dns)
+        else:
+            message = "Network issue detected"
+        
+        emit_alert(message)
+        down_notified = True
+        last_alert_ts = int(time.time())
+    
+    elif fire_up:
+        message = messages.get("recovery", "Network connectivity restored")
+        emit_alert(message)
+        down_notified = False
+        last_alert_ts = int(time.time())
+    
+    # Save updated state
+    state["failStreak"] = fail_streak
+    state["downNotified"] = down_notified
+    state["lastAlertTs"] = last_alert_ts
+    save_state(state)
+
+
+if __name__ == "__main__":
+    main()

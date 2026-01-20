@@ -1,0 +1,478 @@
+# memon Auto-Responder Script
+
+A Python Auto-Responder script for MeshMonitor that monitors home network health (router and DNS resolvers) and outputs JSON alerts only when notifications should fire. Implements failure streak tracking with backoff logic to prevent alert spam.
+
+## Script Overview
+
+This script continuously monitors your network infrastructure:
+
+- **Router Health**: Checks router connectivity via HTTPS or PING
+- **DNS Resolver Health**: Monitors multiple DNS resolvers (e.g., ISP DNS, Google, Cloudflare)
+- **Smart Alerting**: Only sends alerts when:
+  - Failures reach a configurable threshold (`mustFailCount`)
+  - Backoff period has elapsed (prevents alert spam)
+  - Network recovers after being down
+
+The script uses failure streak tracking to distinguish between transient network hiccups and real outages, ensuring you only get notified when action is needed.
+
+### Use Cases
+
+- Monitor home router connectivity
+- Detect ISP DNS outages
+- Track upstream DNS resolver failures
+- Get notified when network issues occur or resolve
+
+## Prerequisites
+
+- **Python**: Version 3.5 or higher
+- **System Requirements**:
+  - `ping` command available (Windows, Linux, macOS)
+  - `dig` or `nslookup` command available for DNS checks (optional, script tries both)
+  - Network access to router and DNS servers
+- **MeshMonitor**: Running instance with Auto Responder feature enabled
+
+## Installation
+
+### 1. Copy Script to MeshMonitor
+
+Copy the script to the MeshMonitor scripts directory:
+
+```bash
+cp memon.py /data/scripts/memon.py
+```
+
+### 2. Make Script Executable
+
+```bash
+chmod +x /data/scripts/memon.py
+```
+
+### 3. Copy Configuration File
+
+Copy the configuration file to an appropriate location (e.g., `/data/scripts/`):
+
+```bash
+cp memon.config.json /data/scripts/memon.config.json
+```
+
+**Note**: The script looks for `memon.config.json` in the current working directory. You may need to adjust the path in the script or ensure the config file is in the same directory as the script.
+
+### 4. Edit Configuration
+
+Edit `memon.config.json` to match your network setup (see Configuration section below).
+
+## Configuration
+
+The script uses `memon.config.json` for all configuration. If the file doesn't exist, default values are used.
+
+### Configuration Schema
+
+```json
+{
+  "timeoutMs": 2500,
+  "mustFailCount": 3,
+  "alertBackoffSeconds": 900,
+  "messages": {
+    "routerDown": "Router is down",
+    "ispDown": "All DNS resolvers failed - ISP may be down",
+    "upstreamDnsDown": "DNS resolvers failed: {{failed}}",
+    "recovery": "Network connectivity restored"
+  },
+  "routerCheck": {
+    "type": "https|ping",
+    "url": "https://192.168.1.1",
+    "insecureTls": false,
+    "host": "192.168.1.1",
+    "pingCount": 1
+  },
+  "dnsChecks": [
+    {
+      "name": "Altibox",
+      "server": "8.8.8.8",
+      "qname": "google.com",
+      "rrtype": "A"
+    }
+  ]
+}
+```
+
+### Configuration Fields
+
+#### Top-Level Settings
+
+- **`timeoutMs`** (integer, default: 2500): Timeout in milliseconds for each individual check (router and DNS). Total script execution must complete within 10 seconds (MeshMonitor hard limit).
+- **`mustFailCount`** (integer, default: 3): Number of consecutive failures required before sending a DOWN alert. Prevents false positives from transient network issues.
+- **`alertBackoffSeconds`** (integer, default: 900): Minimum time in seconds between alerts. Prevents alert spam during extended outages.
+
+#### Messages
+
+Customize alert messages for different failure scenarios:
+
+- **`routerDown`**: Message sent when router check fails
+- **`ispDown`**: Message sent when all DNS resolvers fail (suggests ISP outage)
+- **`upstreamDnsDown`**: Message sent when some (but not all) DNS resolvers fail. Use `{{failed}}` placeholder to list failed resolvers.
+- **`recovery`**: Message sent when network recovers after being down
+
+**Message Length**: Messages are automatically truncated to 200 characters per MeshMonitor requirements.
+
+#### Router Check
+
+Configure how the script checks router connectivity:
+
+- **`type`** (string, required): `"https"` or `"ping"`
+- **`url`** (string, required for HTTPS): Router HTTPS URL (e.g., `"https://192.168.1.1"`)
+- **`insecureTls`** (boolean, default: false): If `true`, disables TLS certificate validation (useful for routers with self-signed certificates)
+- **`host`** (string, required for PING): Router hostname or IP address
+- **`pingCount`** (integer, default: 1): Number of ping packets to send (only used when `type` is `"ping"`)
+
+#### DNS Checks
+
+Array of DNS resolver checks to perform:
+
+- **`name`** (string, required): Friendly name for this DNS resolver (used in alerts)
+- **`server`** (string, required): DNS server IP address
+- **`qname`** (string, required): Domain name to query (e.g., `"google.com"`)
+- **`rrtype`** (string, default: "A"): DNS record type to query (`"A"` for IPv4, `"AAAA"` for IPv6)
+
+### Example Configurations
+
+#### HTTPS Router with Multiple DNS Checks
+
+```json
+{
+  "timeoutMs": 2500,
+  "mustFailCount": 3,
+  "alertBackoffSeconds": 900,
+  "messages": {
+    "routerDown": "Router is down",
+    "ispDown": "All DNS resolvers failed - ISP may be down",
+    "upstreamDnsDown": "DNS resolvers failed: {{failed}}",
+    "recovery": "Network connectivity restored"
+  },
+  "routerCheck": {
+    "type": "https",
+    "url": "https://192.168.1.1",
+    "insecureTls": true,
+    "host": "192.168.1.1",
+    "pingCount": 1
+  },
+  "dnsChecks": [
+    {
+      "name": "ISP DNS",
+      "server": "8.8.8.8",
+      "qname": "google.com",
+      "rrtype": "A"
+    },
+    {
+      "name": "Google DNS",
+      "server": "8.8.8.8",
+      "qname": "google.com",
+      "rrtype": "A"
+    },
+    {
+      "name": "Cloudflare DNS",
+      "server": "1.1.1.1",
+      "qname": "cloudflare.com",
+      "rrtype": "A"
+    }
+  ]
+}
+```
+
+#### PING Router Check
+
+```json
+{
+  "routerCheck": {
+    "type": "ping",
+    "host": "192.168.1.1",
+    "pingCount": 3
+  }
+}
+```
+
+#### Aggressive Monitoring (Faster Alerts)
+
+```json
+{
+  "timeoutMs": 2000,
+  "mustFailCount": 2,
+  "alertBackoffSeconds": 300
+}
+```
+
+#### Conservative Monitoring (Fewer False Positives)
+
+```json
+{
+  "timeoutMs": 3000,
+  "mustFailCount": 5,
+  "alertBackoffSeconds": 1800
+}
+```
+
+## MeshMonitor Setup
+
+### 1. Configure Auto Responder Trigger
+
+1. Navigate to **Settings → Automation → Auto Responder** in MeshMonitor
+2. Click **"Add Trigger"**
+3. Configure the trigger:
+   - **Trigger Pattern**: Use a pattern that matches when you want to check network status. Examples:
+     - `netcheck` - Simple command trigger
+     - `check network` - Phrase trigger
+     - `status` - Short status check
+   - **Response Type**: Select **"Script"**
+   - **Script Path**: Enter `/data/scripts/memon.py`
+
+### 2. Example Trigger Patterns
+
+- **Simple Command**: `netcheck` - Send "netcheck" to trigger
+- **Question Format**: `network status` - Natural language trigger
+- **Periodic Check**: Use MeshMonitor's scheduled triggers (if available) to run periodically
+
+### 3. Script Path Configuration
+
+The script path in MeshMonitor should be:
+```
+/data/scripts/memon.py
+```
+
+**Important**: Ensure the script has execute permissions (`chmod +x`) and the configuration file is accessible from the script's working directory.
+
+### 4. Testing the Trigger
+
+1. Send a message matching your trigger pattern to your MeshMonitor node
+2. The script will run and check network status
+3. If conditions are met (failures exceed threshold, backoff elapsed), you'll receive an alert
+4. Otherwise, the script exits silently (no response)
+
+## How It Works
+
+### Execution Flow
+
+1. **Load Configuration**: Reads `memon.config.json` (or uses defaults)
+2. **Load State**: Reads `memon.state.json` (creates default if missing)
+3. **Check Router**: Performs router check (HTTPS or PING)
+   - If router fails → Classify as "router down", skip DNS checks
+4. **Check DNS** (if router OK): Checks all configured DNS resolvers in parallel
+5. **Classify Status**: Determines failure type (router down, all DNS failed, some DNS failed, or all OK)
+6. **Update Failure Streak**: Increments on failure, resets on success
+7. **Evaluate Alerts**:
+   - **DOWN alert fires when**: `failStreak >= mustFailCount` AND `downNotified == false` AND backoff elapsed
+   - **UP alert fires when**: All checks pass AND `downNotified == true`
+8. **Output**: Emits JSON to stdout only when alert fires, otherwise exits silently
+
+### State Management
+
+The script maintains state in `memon.state.json`:
+
+- **`failStreak`**: Current consecutive failure count
+- **`downNotified`**: Whether a DOWN alert was already sent
+- **`lastAlertTs`**: Timestamp of last alert (for backoff calculation)
+
+State is updated after each alert and persists between script runs.
+
+### Timeout Protection
+
+The script ensures total execution time stays under 10 seconds (MeshMonitor hard limit):
+
+- Individual checks respect `timeoutMs` per check
+- DNS checks run in parallel with overall timeout protection
+- Script exits gracefully if time runs out
+
+## Troubleshooting
+
+### Script Doesn't Run
+
+**Problem**: Script not executing when trigger is sent.
+
+**Solutions**:
+- Verify script has execute permissions: `chmod +x /data/scripts/memon.py`
+- Check script path in MeshMonitor trigger configuration
+- Verify Python is available: `python3 --version`
+- Check MeshMonitor logs for execution errors
+
+### No Alerts Received
+
+**Problem**: Network issues occur but no alerts are sent.
+
+**Possible Causes**:
+- Failure streak hasn't reached `mustFailCount` threshold
+- Backoff period hasn't elapsed since last alert
+- Script is exiting before checks complete (timeout)
+
+**Solutions**:
+- Check `memon.state.json` to see current `failStreak` value
+- Reduce `mustFailCount` for faster alerts (but more false positives)
+- Reduce `alertBackoffSeconds` for more frequent alerts
+- Increase `timeoutMs` if checks are timing out too quickly
+
+### False Positive Alerts
+
+**Problem**: Receiving alerts when network is actually working.
+
+**Solutions**:
+- Increase `mustFailCount` to require more consecutive failures
+- Increase `timeoutMs` to allow more time for slow responses
+- Verify router URL/host and DNS server addresses are correct
+- Check if router requires authentication (HTTPS check may fail)
+
+### DNS Checks Always Fail
+
+**Problem**: DNS checks consistently fail even when network is working.
+
+**Possible Causes**:
+- DNS server addresses are incorrect
+- Firewall blocking DNS queries
+- `dig` or `nslookup` not available on system
+
+**Solutions**:
+- Verify DNS server IP addresses in configuration
+- Test DNS manually: `dig @8.8.8.8 google.com` or `nslookup google.com 8.8.8.8`
+- Check system has `dig` or `nslookup` installed
+- Try different DNS servers (e.g., 1.1.1.1, 8.8.8.8)
+
+### Router Check Fails with HTTPS
+
+**Problem**: HTTPS router check fails even when router is accessible.
+
+**Possible Causes**:
+- Router uses self-signed certificate
+- Router requires authentication
+- Router doesn't support HTTPS
+
+**Solutions**:
+- Set `"insecureTls": true` in router check configuration
+- Try PING check instead: `"type": "ping"`
+- Verify router URL is correct and accessible from browser
+
+### Script Times Out
+
+**Problem**: Script exceeds 10-second MeshMonitor timeout.
+
+**Solutions**:
+- Reduce `timeoutMs` for individual checks
+- Reduce number of DNS checks
+- Reduce `pingCount` for PING router checks
+- Check system performance (high CPU/memory usage can slow checks)
+
+### Configuration File Not Found
+
+**Problem**: Script can't find `memon.config.json`.
+
+**Solutions**:
+- Ensure config file is in the same directory as the script
+- Or modify script to use absolute path to config file
+- Script will use defaults if config file is missing (but this may not be desired)
+
+### State File Issues
+
+**Problem**: State file becomes corrupted or shows incorrect values.
+
+**Solutions**:
+- Delete `memon.state.json` to reset state (script will create new default state)
+- Check file permissions: script needs read/write access
+- Verify JSON syntax is valid if manually editing state file
+
+## Advanced Usage
+
+### Custom Message Templates
+
+Use placeholders in messages for dynamic content:
+
+```json
+{
+  "messages": {
+    "upstreamDnsDown": "DNS issue: {{failed}} are unreachable"
+  }
+}
+```
+
+The `{{failed}}` placeholder is replaced with a comma-separated list of failed DNS resolver names.
+
+### Monitoring Multiple Networks
+
+To monitor multiple networks, create separate script instances:
+
+1. Copy script to different names: `memon-home.py`, `memon-office.py`
+2. Create separate config files: `memon-home.config.json`, `memon-office.config.json`
+3. Create separate state files (script auto-creates based on config path)
+4. Configure separate MeshMonitor triggers for each
+
+### Integration with Other Scripts
+
+The script outputs standard JSON that can be consumed by other tools:
+
+```json
+{
+  "response": "Router is down"
+}
+```
+
+You can pipe script output to other processes or log it for analysis.
+
+## License
+
+This script is provided as-is for use with MeshMonitor. See MeshMonitor project license for details.
+
+## Development & Testing
+
+### Running Tests
+
+The project includes a comprehensive test suite using Python's `unittest` framework.
+
+**Run all tests:**
+```bash
+python -m unittest memon.test
+```
+
+**Run tests with verbose output:**
+```bash
+python -m unittest memon.test -v
+```
+
+**Using Make (if available):**
+```bash
+make test          # Run tests
+make test-verbose  # Run tests with verbose output
+make lint          # Run all lint checks
+```
+
+### Automated Testing
+
+This project includes automated testing that runs on every commit:
+
+- **GitHub Actions**: Tests run automatically on push and pull requests across multiple Python versions (3.7-3.12) and operating systems (Ubuntu, Windows, macOS)
+- **Pre-commit Hooks**: Local tests run before each commit (optional, install with `make install-hooks`)
+
+### Test Coverage
+
+The test suite covers:
+- Configuration loading and validation
+- State file management
+- Router checks (HTTPS and PING)
+- DNS resolver checks
+- Status classification
+- Alert firing logic (DOWN and UP alerts)
+- Failure streak tracking
+- Backoff logic
+- Placeholder replacement
+- Timeout protection
+- Error handling
+
+### Contributing
+
+Found a bug or have a feature request? Please file an issue on the MeshMonitor GitHub repository.
+
+**Before submitting changes:**
+1. Run the test suite: `python -m unittest memon.test -v`
+2. Ensure all tests pass
+3. Verify script syntax: `python -m py_compile memon.py`
+4. Check that the `mm_meta` block is present in `memon.py`
+
+## See Also
+
+- [MeshMonitor User Scripts Documentation](https://meshmonitor.org/user-scripts.html)
+- [MeshMonitor Auto Responder Guide](https://meshmonitor.org/docs/automation/auto-responder.html)
+- [MeshMonitor Scripting Guide](https://meshmonitor.org/docs/development/scripting.html)

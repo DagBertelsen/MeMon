@@ -1,0 +1,40 @@
+# Pre-commit hooks configuration
+# Install with: pip install pre-commit && pre-commit install
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: detect-private-key
+
+  - repo: local
+    hooks:
+      - id: python-tests
+        name: Run Python Tests
+        entry: python -m unittest
+        language: system
+        args: ['memon.test', '-v']
+        pass_filenames: false
+        always_run: true
+        stages: [commit, push]
+
+      - id: python-syntax-check
+        name: Check Python Syntax
+        entry: python -m py_compile
+        language: system
+        types: [python]
+        files: ^memon\.py$
+
+      - id: check-mm-meta
+        name: Check mm_meta block exists
+        entry: bash -c 'head -n 5 memon.py | grep -q "mm_meta" || (echo "ERROR: Missing mm_meta block in memon.py" && exit 1)'
+        language: system
+        files: ^memon\.py$
+        pass_filenames: false
