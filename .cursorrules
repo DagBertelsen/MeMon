@@ -84,9 +84,11 @@ This project implements a Python Auto-Responder script for MeshMonitor that moni
 ## Development Guidelines
 
 ### When Making Changes
-1. **Always run tests** when making code changes: `python -m unittest memon.test` or `make test`
+1. **Always run tests** when making code changes: `python memon.test.py`
+   - Alternative: `python -m unittest discover -s . -p "*.test.py"` (unittest discovery)
    - Tests also run automatically via pre-commit hooks (if installed) and GitHub Actions on push/PR
    - Run tests locally before committing to catch issues early
+   - Note: `python -m unittest memon.test` does not work because `memon.test.py` is a file, not a submodule
 2. **Maintain test coverage** - add tests for new functionality
 3. **Respect MeshMonitor timeout** - ensure total execution < 10 seconds
 4. **Update documentation** if configuration or behavior changes
@@ -110,7 +112,7 @@ This project implements a Python Auto-Responder script for MeshMonitor that moni
 
 ### Git/GitHub Workflow
 - **Commit Guidelines**: 
-  - Always run tests before committing: `make test` or `python -m unittest memon.test`
+  - Always run tests before committing: `python memon.test.py`
   - Write clear, descriptive commit messages
   - Commit related changes together (logical units)
   - Do not commit generated files (see `.gitignore`)

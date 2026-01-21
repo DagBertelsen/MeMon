@@ -42,7 +42,7 @@ jobs:
 
     - name: Run tests
       run: |
-        python -m unittest memon.test -v
+        python memon.test.py -v
 
     - name: Verify script syntax
       run: |
