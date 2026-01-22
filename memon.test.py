@@ -9,11 +9,9 @@ import json
 import sys
 import time
 import socket
+import struct
 import urllib.error
 import ssl
-import dns.resolver
-import dns.exception
-import dns.rdatatype
 
 # Import the module under test
 import memon
@@ -274,66 +272,153 @@ class TestRouterChecks(unittest.TestCase):
         mock_https.assert_called_once_with("https://192.168.1.1:443", False, 2500)
 
 
+def _build_dns_response_packet(transaction_id: int, rcode: int, ancount: int, 
+                                qname: str, qtype: int, answer_type: int, 
+                                answer_data: bytes) -> bytes:
+    """
+    Build a DNS response packet for testing.
+    
+    Args:
+        transaction_id: Transaction ID
+        rcode: Response code (0=NOERROR, 3=NXDOMAIN)
+        ancount: Number of answers
+        qname: Query name
+        qtype: Query type (1=A, 28=AAAA)
+        answer_type: Answer type (1=A, 28=AAAA)
+        answer_data: Answer data (4 bytes for A, 16 bytes for AAAA)
+        
+    Returns:
+        DNS response packet as bytes
+    """
+    # Encode domain name
+    qname_encoded = b""
+    for label in qname.split("."):
+        if label:
+            qname_encoded += struct.pack("B", len(label)) + label.encode("ascii")
+    qname_encoded += b"\x00"
+    
+    # Header: ID, Flags, QDCOUNT, ANCOUNT, NSCOUNT, ARCOUNT
+    flags = 0x8180 | rcode  # Response flag + rcode
+    header = struct.pack("!HHHHHH", transaction_id, flags, 1, ancount, 0, 0)
+    
+    # Question section
+    question = struct.pack("!HH", qtype, 1)  # QTYPE, QCLASS=IN
+    
+    # Answer section (if any)
+    answer = b""
+    if ancount > 0:
+        # NAME (compressed pointer to question section at offset 12)
+        answer += struct.pack("!H", 0xC00C)  # Pointer to offset 12
+        # TYPE, CLASS, TTL, RDLENGTH
+        answer += struct.pack("!HHIH", answer_type, 1, 300, len(answer_data))
+        # RDATA
+        answer += answer_data
+    
+    return header + qname_encoded + question + answer
+
+
 class TestDNSChecks(unittest.TestCase):
     """Test DNS check functionality."""
     
-    @patch('dns.resolver.Resolver')
-    def test_check_dns_success(self, mock_resolver_class):
-        """Test successful DNS check using dnspython."""
-        mock_resolver = Mock()
-        mock_resolver_class.return_value = mock_resolver
-        mock_answer = Mock()
-        mock_resolver.resolve.return_value = mock_answer
+    @patch('socket.socket')
+    def test_check_dns_success(self, mock_socket_class):
+        """Test successful DNS check using standard library."""
+        mock_socket = Mock()
+        mock_socket_class.return_value = mock_socket
+        
+        # Build valid DNS response with A record
+        response = _build_dns_response_packet(
+            transaction_id=12345,
+            rcode=0,  # NOERROR
+            ancount=1,
+            qname="google.com",
+            qtype=1,  # A
+            answer_type=1,  # A
+            answer_data=struct.pack("!BBBB", 8, 8, 8, 8)  # 8.8.8.8
+        )
+        mock_socket.recvfrom.return_value = (response, ("8.8.8.8", 53))
         
         success, _ = memon.check_dns("8.8.8.8", "google.com", "A", 2500)
         self.assertTrue(success)
-        mock_resolver_class.assert_called_once_with(configure=False)
-        self.assertEqual(mock_resolver.nameservers, ["8.8.8.8"])
-        mock_resolver.resolve.assert_called_once()
+        mock_socket_class.assert_called_once_with(socket.AF_INET, socket.SOCK_DGRAM)
+        mock_socket.sendto.assert_called_once()
+        mock_socket.recvfrom.assert_called_once()
+        mock_socket.close.assert_called_once()
     
-    @patch('dns.resolver.Resolver')
-    def test_check_dns_failure(self, mock_resolver_class):
-        """Test failed DNS check."""
-        mock_resolver = Mock()
-        mock_resolver_class.return_value = mock_resolver
-        mock_resolver.resolve.side_effect = dns.resolver.NXDOMAIN()
+    @patch('socket.socket')
+    def test_check_dns_failure(self, mock_socket_class):
+        """Test failed DNS check (NXDOMAIN)."""
+        mock_socket = Mock()
+        mock_socket_class.return_value = mock_socket
+        
+        # Build DNS response with NXDOMAIN
+        response = _build_dns_response_packet(
+            transaction_id=12345,
+            rcode=3,  # NXDOMAIN
+            ancount=0,
+            qname="google.com",
+            qtype=1,  # A
+            answer_type=1,  # A
+            answer_data=b""
+        )
+        mock_socket.recvfrom.return_value = (response, ("8.8.8.8", 53))
         
         success, _ = memon.check_dns("8.8.8.8", "google.com", "A", 2500)
         self.assertFalse(success)
     
-    @patch('dns.resolver.Resolver')
-    def test_check_dns_timeout(self, mock_resolver_class):
+    @patch('socket.socket')
+    def test_check_dns_timeout(self, mock_socket_class):
         """Test DNS check with timeout."""
-        mock_resolver = Mock()
-        mock_resolver_class.return_value = mock_resolver
-        mock_resolver.resolve.side_effect = dns.exception.Timeout()
+        mock_socket = Mock()
+        mock_socket_class.return_value = mock_socket
+        mock_socket.recvfrom.side_effect = socket.timeout()
         
         success, _ = memon.check_dns("8.8.8.8", "google.com", "A", 2500)
         self.assertFalse(success)
+        mock_socket.close.assert_called_once()
     
-    @patch('dns.resolver.Resolver')
-    def test_check_dns_no_answer(self, mock_resolver_class):
+    @patch('socket.socket')
+    def test_check_dns_no_answer(self, mock_socket_class):
         """Test DNS check with no answer."""
-        mock_resolver = Mock()
-        mock_resolver_class.return_value = mock_resolver
-        mock_resolver.resolve.side_effect = dns.resolver.NoAnswer()
+        mock_socket = Mock()
+        mock_socket_class.return_value = mock_socket
+        
+        # Build DNS response with no answers (ANCOUNT=0, but NOERROR)
+        response = _build_dns_response_packet(
+            transaction_id=12345,
+            rcode=0,  # NOERROR
+            ancount=0,  # No answers
+            qname="google.com",
+            qtype=1,  # A
+            answer_type=1,  # A
+            answer_data=b""
+        )
+        mock_socket.recvfrom.return_value = (response, ("8.8.8.8", 53))
         
         success, _ = memon.check_dns("8.8.8.8", "google.com", "A", 2500)
         self.assertFalse(success)
     
-    @patch('dns.resolver.Resolver')
-    def test_check_dns_aaaa_record(self, mock_resolver_class):
+    @patch('socket.socket')
+    def test_check_dns_aaaa_record(self, mock_socket_class):
         """Test DNS check with AAAA record type."""
-        mock_resolver = Mock()
-        mock_resolver_class.return_value = mock_resolver
-        mock_answer = Mock()
-        mock_resolver.resolve.return_value = mock_answer
+        mock_socket = Mock()
+        mock_socket_class.return_value = mock_socket
+        
+        # Build valid DNS response with AAAA record
+        response = _build_dns_response_packet(
+            transaction_id=12345,
+            rcode=0,  # NOERROR
+            ancount=1,
+            qname="google.com",
+            qtype=28,  # AAAA
+            answer_type=28,  # AAAA
+            answer_data=struct.pack("!HHHHHHHH", 0x2001, 0x4860, 0x4860, 0x0000,
+                                   0x0000, 0x0000, 0x0000, 0x8888)  # Sample IPv6
+        )
+        mock_socket.recvfrom.return_value = (response, ("1.1.1.1", 53))
         
         success, _ = memon.check_dns("1.1.1.1", "google.com", "AAAA", 2500)
         self.assertTrue(success)
-        # Verify AAAA was used
-        call_args = mock_resolver.resolve.call_args
-        self.assertEqual(call_args[0][1], dns.rdatatype.AAAA)
     
     @patch('memon.check_dns')
     def test_check_all_dns_all_pass(self, mock_check_dns):

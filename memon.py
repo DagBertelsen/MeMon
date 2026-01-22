@@ -15,20 +15,13 @@ import json
 import os
 import sys
 import socket
+import struct
 import time
 import ssl
 import urllib.request
 import urllib.error
 from typing import Dict, List, Optional, Tuple, Any
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-try:
-    import dns.resolver
-    import dns.exception
-    import dns.rdatatype
-except ImportError as e:
-    print(f"Error: Required library 'dnspython' is not installed. Install it with: pip install dnspython", file=sys.stderr)
-    print(f"ImportError details: {e}", file=sys.stderr)
-    sys.exit(1)
 
 
 # Default configuration values
@@ -36,6 +29,7 @@ DEFAULT_CONFIG = {
     "timeoutMs": 2500,
     "mustFailCount": 3,
     "alertBackoffSeconds": 900,
+    "debug": False,
     "messages": {
         "routerDown": "Router is down",
         "ispDown": "All DNS resolvers failed - ISP may be down",
@@ -268,13 +262,14 @@ def check_router_tcp(host: str, timeout_ms: int, port: int = 80) -> bool:
         return False
 
 
-def check_router(router_check: Dict[str, Any], timeout_ms: int) -> bool:
+def check_router(router_check: Dict[str, Any], timeout_ms: int, debug: bool = False) -> bool:
     """
     Perform router check (HTTPS, HTTP, or TCP socket connection).
     
     Args:
         router_check: Router check configuration
         timeout_ms: Timeout in milliseconds
+        debug: If True, print failure messages to stdout
         
     Returns:
         True if router check passes, False otherwise
@@ -286,23 +281,198 @@ def check_router(router_check: Dict[str, Any], timeout_ms: int) -> bool:
     if method == "tcp":
         if port is None:
             port = 80
-        return check_router_tcp(host, timeout_ms, port)
+        result = check_router_tcp(host, timeout_ms, port)
+        if not result and debug:
+            print(f"[Router Check] Failed: {method} {host}:{port} - TCP connection failed", file=sys.stdout)
+        return result
     elif method == "http":
         if port is None:
             port = 80
         url = f"http://{host}:{port}"
-        return check_router_http(url, timeout_ms)
+        result = check_router_http(url, timeout_ms)
+        if not result and debug:
+            print(f"[Router Check] Failed: {method} {host}:{port} - HTTP request failed", file=sys.stdout)
+        return result
     else:  # https (default)
         if port is None:
             port = 443
         url = f"https://{host}:{port}"
         insecure_tls = router_check.get("insecureTls", False)
-        return check_router_https(url, insecure_tls, timeout_ms)
+        result = check_router_https(url, insecure_tls, timeout_ms)
+        if not result and debug:
+            print(f"[Router Check] Failed: {method} {host}:{port} - HTTPS request failed", file=sys.stdout)
+        return result
+
+
+def _encode_domain_name(domain: str) -> bytes:
+    """
+    Encode domain name for DNS packet (length-prefixed labels, null-terminated).
+    
+    Args:
+        domain: Domain name (e.g., "google.com")
+        
+    Returns:
+        Encoded domain name as bytes
+    """
+    encoded = b""
+    for label in domain.split("."):
+        if label:
+            encoded += struct.pack("B", len(label)) + label.encode("ascii")
+    encoded += b"\x00"  # Null terminator
+    return encoded
+
+
+def _build_dns_query(qname: str, rrtype: str) -> bytes:
+    """
+    Build DNS query packet.
+    
+    Args:
+        qname: Query name (domain to resolve)
+        rrtype: Record type (A or AAAA)
+        
+    Returns:
+        DNS query packet as bytes
+    """
+    # Generate random transaction ID
+    import random
+    transaction_id = random.randint(0, 65535)
+    
+    # DNS header (12 bytes)
+    # ID (2 bytes), Flags (2 bytes), QDCOUNT (2 bytes), ANCOUNT (2 bytes),
+    # NSCOUNT (2 bytes), ARCOUNT (2 bytes)
+    flags = 0x0100  # Standard query, recursion desired
+    qdcount = 1  # One question
+    header = struct.pack("!HHHHHH", transaction_id, flags, qdcount, 0, 0, 0)
+    
+    # Question section
+    qname_encoded = _encode_domain_name(qname)
+    
+    # QTYPE: A=1, AAAA=28
+    if rrtype.upper() == "AAAA":
+        qtype = 28
+    else:  # Default to A
+        qtype = 1
+    
+    qclass = 1  # IN (Internet)
+    question = struct.pack("!HH", qtype, qclass)
+    
+    return header + qname_encoded + question
+
+
+def _parse_dns_response(data: bytes, expected_rrtype: str) -> Tuple[bool, str]:
+    """
+    Parse DNS response packet and verify it contains expected record type.
+    
+    Args:
+        data: DNS response packet bytes
+        expected_rrtype: Expected record type (A or AAAA)
+        
+    Returns:
+        Tuple of (success: bool, error_message: str)
+    """
+    if len(data) < 12:
+        return False, "Response too short (less than 12 bytes)"
+    
+    try:
+        # Parse header
+        header = struct.unpack("!HHHHHH", data[0:12])
+        flags = header[1]
+        qdcount = header[2]
+        ancount = header[3]
+        
+        # Check response code (bits 0-3 of flags byte 2)
+        rcode = flags & 0x000F
+        if rcode != 0:  # NOERROR = 0, NXDOMAIN = 3, etc.
+            rcode_names = {0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN", 4: "NOTIMP", 5: "REFUSED"}
+            rcode_name = rcode_names.get(rcode, f"RCODE{rcode}")
+            return False, f"DNS response error: {rcode_name}"
+        
+        # Check if we have answers
+        if ancount == 0:
+            return False, "No answers in DNS response"
+        
+        # Skip question section to find answer section
+        offset = 12
+        # Skip QNAME
+        while offset < len(data) and data[offset] != 0:
+            if data[offset] & 0xC0 == 0xC0:  # Compression pointer
+                offset += 2
+                break
+            else:
+                label_len = data[offset]
+                if label_len == 0:
+                    break
+                if offset + 1 + label_len > len(data):
+                    return False, "Invalid QNAME: label extends beyond packet"
+                offset += 1 + label_len
+        if offset < len(data) and data[offset] == 0:
+            offset += 1  # Skip null terminator
+        
+        # Skip QTYPE and QCLASS (4 bytes)
+        if offset + 4 > len(data):
+            return False, "Invalid question section: QTYPE/QCLASS missing"
+        offset += 4
+        
+        # Parse answer section
+        expected_type = 28 if expected_rrtype.upper() == "AAAA" else 1
+        found_match = False
+        
+        for _ in range(ancount):
+            if offset >= len(data):
+                return False, "Answer section extends beyond packet"
+            
+            # Skip NAME (may be compressed)
+            if offset < len(data) and data[offset] & 0xC0 == 0xC0:
+                offset += 2  # Compression pointer
+            else:
+                # Skip uncompressed name
+                while offset < len(data) and data[offset] != 0:
+                    label_len = data[offset]
+                    if label_len == 0:
+                        break
+                    if offset + 1 + label_len > len(data):
+                        return False, "Invalid answer NAME: label extends beyond packet"
+                    offset += 1 + label_len
+                if offset < len(data):
+                    offset += 1  # Skip null terminator
+            
+            if offset + 10 > len(data):
+                return False, "Answer record header incomplete"
+            
+            # Parse answer record: TYPE (2), CLASS (2), TTL (4), RDLENGTH (2)
+            answer_header = struct.unpack("!HHIH", data[offset:offset+10])
+            answer_type = answer_header[0]
+            rdlength = answer_header[3]  # RDLENGTH is the 4th element (index 3)
+            offset += 10
+            
+            # Check if this answer matches expected type
+            if answer_type == expected_type:
+                # Verify RDATA length matches expected type
+                if expected_type == 1:  # A record
+                    if rdlength == 4:  # IPv4 is 4 bytes
+                        found_match = True
+                        break
+                elif expected_type == 28:  # AAAA record
+                    if rdlength == 16:  # IPv6 is 16 bytes
+                        found_match = True
+                        break
+            
+            # Skip RDATA
+            if offset + rdlength > len(data):
+                return False, "Answer RDATA extends beyond packet"
+            offset += rdlength
+        
+        if not found_match:
+            return False, f"No {expected_rrtype} record found in response"
+        
+        return True, ""
+    except (struct.error, IndexError) as e:
+        return False, f"DNS parsing error: {str(e)}"
 
 
 def check_dns(server: str, qname: str, rrtype: str, timeout_ms: int) -> Tuple[bool, str]:
     """
-    Check single DNS resolver using dnspython library.
+    Check single DNS resolver using standard library socket.
     
     Args:
         server: DNS server IP address
@@ -311,32 +481,45 @@ def check_dns(server: str, qname: str, rrtype: str, timeout_ms: int) -> Tuple[bo
         timeout_ms: Timeout in milliseconds
         
     Returns:
-        Tuple of (success: bool, name: str for error reporting)
+        Tuple of (success: bool, error_message: str)
     """
     try:
         timeout_sec = timeout_ms / 1000.0
         
-        # Create resolver with custom nameserver
-        resolver = dns.resolver.Resolver(configure=False)
-        resolver.nameservers = [server]
-        resolver.timeout = timeout_sec
-        resolver.lifetime = timeout_sec
+        # Build DNS query packet
+        query = _build_dns_query(qname, rrtype)
         
-        # Convert rrtype string to dns.rdatatype
-        rrtype_enum = dns.rdatatype.from_text(rrtype.upper())
+        # Create UDP socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(timeout_sec)
         
-        # Query DNS
-        resolver.resolve(qname, rrtype_enum, lifetime=timeout_sec)
-        return True, ""
-    except (dns.exception.DNSException, dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, 
-            dns.exception.Timeout, OSError, ValueError):
-        return False, ""
+        try:
+            # Send query to DNS server on port 53
+            sock.sendto(query, (server, 53))
+            
+            # Receive response
+            data, _ = sock.recvfrom(512)  # DNS responses are typically < 512 bytes
+            
+            # Parse and validate response
+            success, error_msg = _parse_dns_response(data, rrtype)
+            if not success:
+                return False, error_msg
+            return True, ""
+        finally:
+            sock.close()
+            
+    except socket.timeout:
+        return False, "Timeout waiting for DNS response"
+    except (socket.error, OSError) as e:
+        return False, f"Socket error: {str(e)}"
+    except (ValueError, struct.error) as e:
+        return False, f"Protocol error: {str(e)}"
     # Catch any other unexpected exceptions to prevent script crash
-    except Exception:
-        return False, ""
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
 
 
-def check_all_dns(dns_checks: List[Dict[str, Any]], timeout_ms: int, max_total_time: float) -> Tuple[List[str], List[str]]:
+def check_all_dns(dns_checks: List[Dict[str, Any]], timeout_ms: int, max_total_time: float, debug: bool = False) -> Tuple[List[str], List[str]]:
     """
     Check all DNS resolvers in parallel (with timeout protection).
     
@@ -344,6 +527,7 @@ def check_all_dns(dns_checks: List[Dict[str, Any]], timeout_ms: int, max_total_t
         dns_checks: List of DNS check configurations
         timeout_ms: Timeout per DNS check in milliseconds
         max_total_time: Maximum total time allowed (seconds)
+        debug: If True, print failure messages to stdout
         
     Returns:
         Tuple of (failed_names: List[str], all_names: List[str])
@@ -366,23 +550,35 @@ def check_all_dns(dns_checks: List[Dict[str, Any]], timeout_ms: int, max_total_t
             name = check.get("name", "Unknown")
             
             future = executor.submit(check_dns, server, qname, rrtype, timeout_ms)
-            futures[future] = name
+            futures[future] = (name, server, qname)
         
         # Wait for all with overall timeout protection
         for future in futures:
             elapsed = time.time() - start_time
             remaining_time = max_total_time - elapsed
+            name, server, qname = futures[future]
+            
             if remaining_time <= 0:
                 # Out of time, mark remaining as failed
-                failed_names.append(futures[future])
+                failed_names.append(name)
+                if debug:
+                    print(f"[DNS Check] Failed: {name} ({server}) querying {qname} - Timeout (out of time)", file=sys.stdout)
                 continue
             
             try:
-                success, _ = future.result(timeout=min(remaining_time, timeout_ms / 1000.0 + 0.5))
+                success, error_msg = future.result(timeout=min(remaining_time, timeout_ms / 1000.0 + 0.5))
                 if not success:
-                    failed_names.append(futures[future])
-            except (FutureTimeoutError, Exception):
-                failed_names.append(futures[future])
+                    failed_names.append(name)
+                    if debug:
+                        print(f"[DNS Check] Failed: {name} ({server}) querying {qname} - {error_msg}", file=sys.stdout)
+            except FutureTimeoutError:
+                failed_names.append(name)
+                if debug:
+                    print(f"[DNS Check] Failed: {name} ({server}) querying {qname} - Timeout waiting for response", file=sys.stdout)
+            except Exception as e:
+                failed_names.append(name)
+                if debug:
+                    print(f"[DNS Check] Failed: {name} ({server}) querying {qname} - Exception: {str(e)}", file=sys.stdout)
     
     return failed_names, all_names
 
@@ -598,6 +794,7 @@ def main() -> None:
     timeout_ms = config.get("timeoutMs", 2500)
     must_fail_count = config.get("mustFailCount", 3)
     backoff_seconds = config.get("alertBackoffSeconds", 900)
+    debug = config.get("debug", False)
     messages = config.get("messages", {})
     router_check = config.get("routerCheck", {})
     dns_checks = config.get("dnsChecks", [])
@@ -618,7 +815,7 @@ def main() -> None:
         return
     
     # Check router first
-    router_ok = check_router(router_check, timeout_ms)
+    router_ok = check_router(router_check, timeout_ms, debug)
     
     # If router is down, skip DNS checks
     failed_dns = []
@@ -628,7 +825,7 @@ def main() -> None:
         elapsed = time.time() - start_time
         remaining_time = MESHMONITOR_TIMEOUT - elapsed - TIMEOUT_SAFETY_MARGIN
         if remaining_time > 0:
-            failed_dns, all_dns = check_all_dns(dns_checks, timeout_ms, remaining_time)
+            failed_dns, all_dns = check_all_dns(dns_checks, timeout_ms, remaining_time, debug)
     
     # Classify status
     status = classify_status(router_ok, failed_dns, all_dns)

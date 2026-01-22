@@ -25,9 +25,7 @@ The script uses failure streak tracking to distinguish between transient network
 
 ## Prerequisites
 
-- **Python**: Version 3.5 or higher
-- **Python Dependencies**: 
-  - `dnspython` library (install via `pip install dnspython` or `pip install -r requirements.txt`)
+- **Python**: Version 3.5 or higher (uses only standard library - no external dependencies)
 - **System Requirements**:
   - Network access to router and DNS servers
 - **MeshMonitor**: Running instance with Auto Responder feature enabled
@@ -50,17 +48,7 @@ chmod +x /data/scripts/memon.py
 
 ### 3. Install Dependencies
 
-Install required Python dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-Or install directly:
-
-```bash
-pip install dnspython
-```
+No external Python dependencies are required. The script uses only Python standard library modules.
 
 ### 4. Copy Configuration File
 
@@ -87,6 +75,7 @@ The script uses `memon.config.json` for all configuration. If the file doesn't e
   "timeoutMs": 2500,
   "mustFailCount": 3,
   "alertBackoffSeconds": 900,
+  "debug": false,
   "messages": {
     "routerDown": "Router is down",
     "ispDown": "All DNS resolvers failed - ISP may be down",
@@ -101,7 +90,7 @@ The script uses `memon.config.json` for all configuration. If the file doesn't e
   },
   "dnsChecks": [
     {
-      "name": "Altibox",
+      "name": "Google DNS",
       "server": "8.8.8.8",
       "qname": "google.com",
       "rrtype": "A"
@@ -117,6 +106,7 @@ The script uses `memon.config.json` for all configuration. If the file doesn't e
 - **`timeoutMs`** (integer, default: 2500): Timeout in milliseconds for each individual check (router and DNS). Total script execution must complete within 10 seconds (MeshMonitor hard limit).
 - **`mustFailCount`** (integer, default: 3): Number of consecutive failures required before sending a DOWN alert. Prevents false positives from transient network issues.
 - **`alertBackoffSeconds`** (integer, default: 900): Minimum time in seconds between alerts. Prevents alert spam during extended outages.
+- **`debug`** (boolean, default: false): If `true`, prints failure messages to stdout for debugging purposes. When `false` (default), only JSON alerts are printed to stdout, ensuring clean output for MeshMonitor. Failure messages include router check failures and DNS check failures with error details.
 
 #### Messages
 
@@ -165,6 +155,7 @@ Array of DNS resolver checks to perform:
   "timeoutMs": 2500,
   "mustFailCount": 3,
   "alertBackoffSeconds": 900,
+  "debug": false,
   "messages": {
     "routerDown": "Router is down",
     "ispDown": "All DNS resolvers failed - ISP may be down",
@@ -290,7 +281,7 @@ The script path in MeshMonitor should be:
 2. **Load State**: Reads `memon.state.json` (creates default if missing)
 3. **Check Router**: Performs router check (HTTPS or TCP socket connection)
    - If router fails → Classify as "router down", skip DNS checks
-4. **Check DNS** (if router OK): Checks all configured DNS resolvers in parallel using dnspython library
+4. **Check DNS** (if router OK): Checks all configured DNS resolvers in parallel using standard library socket
 5. **Classify Status**: Determines failure type (router down, all DNS failed, some DNS failed, or all OK)
 6. **Update Failure Streak**: Increments on failure, resets on success
 7. **Evaluate Alerts**:
@@ -300,7 +291,7 @@ The script path in MeshMonitor should be:
      - Router recovers but DNS issues remain (routerDown → ispDown/upstreamDnsDown)
      - All DNS failed → some DNS recovered (ispDown → upstreamDnsDown)
      - Some DNS recovered (upstreamDnsDown → upstreamDnsDown with fewer failures)
-8. **Output**: Emits JSON to stdout only when alert fires, otherwise exits silently
+8. **Output**: Emits JSON to stdout only when alert fires, otherwise exits silently. When `debug=true`, failure messages are also printed to stdout for troubleshooting.
 
 ### State Management
 
@@ -359,6 +350,7 @@ Partial recovery alerts bypass the backoff period, ensuring you're immediately n
 - Reduce `mustFailCount` for faster alerts (but more false positives)
 - Reduce `alertBackoffSeconds` for more frequent alerts
 - Increase `timeoutMs` if checks are timing out too quickly
+- Enable `"debug": true` in configuration to see detailed failure messages in stdout (useful for troubleshooting, but note this will interfere with MeshMonitor's JSON parsing)
 
 ### False Positive Alerts
 
@@ -377,14 +369,13 @@ Partial recovery alerts bypass the backoff period, ensuring you're immediately n
 **Possible Causes**:
 - DNS server addresses are incorrect
 - Firewall blocking DNS queries
-- `dnspython` library not installed
+- Network connectivity issues
 
 **Solutions**:
 - Verify DNS server IP addresses in configuration
-- Ensure `dnspython` is installed: `pip install dnspython`
-- Test DNS manually using Python: `python -c "import dns.resolver; print(dns.resolver.resolve('google.com', 'A', nameserver='8.8.8.8'))"`
 - Try different DNS servers (e.g., 1.1.1.1, 8.8.8.8)
 - Check firewall rules allow DNS queries (UDP port 53)
+- Test DNS manually using `nslookup` or `dig`: `nslookup google.com 8.8.8.8`
 
 ### Router Check Fails with HTTPS
 
@@ -432,6 +423,22 @@ Partial recovery alerts bypass the backoff period, ensuring you're immediately n
 - Verify JSON syntax is valid if manually editing state file
 
 ## Advanced Usage
+
+### Debug Mode
+
+Enable debug mode to see detailed failure messages for troubleshooting:
+
+```json
+{
+  "debug": true
+}
+```
+
+When `debug=true`, the script prints failure messages to stdout, including:
+- Router check failures with connection details
+- DNS check failures with error messages and timeouts
+
+**Important**: Debug mode should only be used for troubleshooting. When enabled, the failure messages printed to stdout will interfere with MeshMonitor's JSON parsing. Always set `"debug": false` for production use to ensure clean JSON-only output.
 
 ### Custom Message Templates
 
