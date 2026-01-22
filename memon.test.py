@@ -8,10 +8,12 @@ from unittest.mock import Mock, patch, mock_open, MagicMock
 import json
 import sys
 import time
-import subprocess
+import socket
 import urllib.error
 import ssl
-import shutil
+import dns.resolver
+import dns.exception
+import dns.rdatatype
 
 # Import the module under test
 import memon
@@ -22,9 +24,10 @@ class TestConfigLoading(unittest.TestCase):
     
     def test_load_config_missing_file(self):
         """Test that load_config errors when config file doesn't exist."""
-        with patch('os.path.exists', return_value=False):
-            with patch('sys.exit') as mock_exit:
-                memon.load_config("nonexistent.json")
+        with patch('memon.os.path.exists', return_value=False):
+            with patch('memon.sys.exit', side_effect=SystemExit(1)) as mock_exit:
+                with self.assertRaises(SystemExit):
+                    memon.load_config("nonexistent.json")
                 mock_exit.assert_called_once_with(1)
     
     def test_load_config_from_file(self):
@@ -143,127 +146,194 @@ class TestRouterChecks(unittest.TestCase):
         call_kwargs = mock_urlopen.call_args[1]
         self.assertIn('context', call_kwargs)
     
-    @patch('subprocess.run')
-    def test_check_router_ping_success(self, mock_run):
-        """Test successful ping router check."""
-        mock_run.return_value = Mock(returncode=0)
+    @patch('socket.create_connection')
+    def test_check_router_tcp_success(self, mock_create_connection):
+        """Test successful TCP socket connection router check."""
+        mock_sock = Mock()
+        mock_create_connection.return_value = mock_sock
         
-        result = memon.check_router_ping("192.168.1.1", 1, 2500)
+        result = memon.check_router_tcp("192.168.1.1", 2500, 80)
         self.assertTrue(result)
+        mock_create_connection.assert_called_once()
+        mock_sock.close.assert_called_once()
     
-    @patch('subprocess.run')
-    def test_check_router_ping_failure(self, mock_run):
-        """Test failed ping router check."""
-        mock_run.return_value = Mock(returncode=1)
+    @patch('socket.create_connection')
+    def test_check_router_tcp_failure(self, mock_create_connection):
+        """Test failed TCP socket connection router check."""
+        mock_create_connection.side_effect = socket.error("Connection refused")
         
-        result = memon.check_router_ping("192.168.1.1", 1, 2500)
+        result = memon.check_router_tcp("192.168.1.1", 2500, 80)
         self.assertFalse(result)
     
-    @patch('subprocess.run')
-    def test_check_router_ping_timeout(self, mock_run):
-        """Test ping router check with timeout."""
-        mock_run.side_effect = subprocess.TimeoutExpired("ping", 1)
+    @patch('socket.create_connection')
+    def test_check_router_tcp_timeout(self, mock_create_connection):
+        """Test TCP socket connection router check with timeout."""
+        mock_create_connection.side_effect = socket.timeout("Connection timed out")
         
-        result = memon.check_router_ping("192.168.1.1", 1, 2500)
+        result = memon.check_router_tcp("192.168.1.1", 2500, 80)
+        self.assertFalse(result)
+    
+    @patch('socket.create_connection')
+    def test_check_router_tcp_custom_port(self, mock_create_connection):
+        """Test TCP socket connection router check with custom port."""
+        mock_sock = Mock()
+        mock_create_connection.return_value = mock_sock
+        
+        result = memon.check_router_tcp("192.168.1.1", 2500, 443)
+        self.assertTrue(result)
+        # Verify port 443 was used
+        call_args = mock_create_connection.call_args[0]
+        self.assertEqual(call_args[0][1], 443)
+    
+    @patch('urllib.request.urlopen')
+    def test_check_router_http_success(self, mock_urlopen):
+        """Test successful HTTP router check."""
+        mock_response = Mock()
+        mock_response.getcode.return_value = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+        
+        result = memon.check_router_http("http://192.168.1.1", 2500)
+        self.assertTrue(result)
+    
+    @patch('urllib.request.urlopen')
+    def test_check_router_http_failure(self, mock_urlopen):
+        """Test failed HTTP router check."""
+        mock_urlopen.side_effect = urllib.error.URLError("Connection failed")
+        
+        result = memon.check_router_http("http://192.168.1.1", 2500)
         self.assertFalse(result)
     
     @patch('memon.check_router_https')
-    def test_check_router_https_type(self, mock_https):
-        """Test router check with HTTPS type."""
+    def test_check_router_https_method(self, mock_https):
+        """Test router check with HTTPS method."""
         mock_https.return_value = True
-        router_check = {"type": "https", "host": "https://192.168.1.1", "insecureTls": False}
+        router_check = {"method": "https", "host": "192.168.1.1", "insecureTls": False}
         
         result = memon.check_router(router_check, 2500)
         self.assertTrue(result)
-        mock_https.assert_called_once()
+        mock_https.assert_called_once_with("https://192.168.1.1:443", False, 2500)
     
-    @patch('memon.check_router_ping')
-    def test_check_router_ping_type(self, mock_ping):
-        """Test router check with PING type."""
-        mock_ping.return_value = True
-        router_check = {"type": "ping", "host": "192.168.1.1", "pingCount": 1}
+    @patch('memon.check_router_tcp')
+    def test_check_router_tcp_method(self, mock_tcp):
+        """Test router check with TCP method."""
+        mock_tcp.return_value = True
+        router_check = {"method": "tcp", "host": "192.168.1.1"}
         
         result = memon.check_router(router_check, 2500)
         self.assertTrue(result)
-        mock_ping.assert_called_once()
+        mock_tcp.assert_called_once_with("192.168.1.1", 2500, 80)
+    
+    @patch('memon.check_router_tcp')
+    def test_check_router_tcp_method_with_port(self, mock_tcp):
+        """Test router check with TCP method and custom port."""
+        mock_tcp.return_value = True
+        router_check = {"method": "tcp", "host": "192.168.1.1", "port": 443}
+        
+        result = memon.check_router(router_check, 2500)
+        self.assertTrue(result)
+        mock_tcp.assert_called_once_with("192.168.1.1", 2500, 443)
+    
+    @patch('memon.check_router_http')
+    def test_check_router_http_method(self, mock_http):
+        """Test router check with HTTP method."""
+        mock_http.return_value = True
+        router_check = {"method": "http", "host": "192.168.1.1"}
+        
+        result = memon.check_router(router_check, 2500)
+        self.assertTrue(result)
+        mock_http.assert_called_once_with("http://192.168.1.1:80", 2500)
+    
+    @patch('memon.check_router_http')
+    def test_check_router_http_method_with_port(self, mock_http):
+        """Test router check with HTTP method and custom port."""
+        mock_http.return_value = True
+        router_check = {"method": "http", "host": "192.168.1.1", "port": 8080}
+        
+        result = memon.check_router(router_check, 2500)
+        self.assertTrue(result)
+        mock_http.assert_called_once_with("http://192.168.1.1:8080", 2500)
     
     @patch('memon.check_router_https')
-    def test_check_router_https_host_without_protocol(self, mock_https):
-        """Test HTTPS router check with host that doesn't have protocol (should prepend https://)."""
+    def test_check_router_https_method_with_port(self, mock_https):
+        """Test router check with HTTPS method and custom port."""
         mock_https.return_value = True
-        router_check = {"type": "https", "host": "192.168.1.1", "insecureTls": False}
+        router_check = {"method": "https", "host": "192.168.1.1", "port": 8443, "insecureTls": False}
         
         result = memon.check_router(router_check, 2500)
         self.assertTrue(result)
-        mock_https.assert_called_once_with("https://192.168.1.1", False, 2500)
+        mock_https.assert_called_once_with("https://192.168.1.1:8443", False, 2500)
     
     @patch('memon.check_router_https')
-    def test_check_router_https_host_with_https_protocol(self, mock_https):
-        """Test HTTPS router check with host that has https:// protocol."""
+    def test_check_router_default_method(self, mock_https):
+        """Test router check defaults to HTTPS method."""
         mock_https.return_value = True
-        router_check = {"type": "https", "host": "https://192.168.1.1", "insecureTls": False}
+        router_check = {"host": "192.168.1.1", "insecureTls": False}
         
         result = memon.check_router(router_check, 2500)
         self.assertTrue(result)
-        mock_https.assert_called_once_with("https://192.168.1.1", False, 2500)
-    
-    @patch('memon.check_router_https')
-    def test_check_router_https_host_with_http_protocol(self, mock_https):
-        """Test HTTPS router check with host that has http:// protocol."""
-        mock_https.return_value = True
-        router_check = {"type": "https", "host": "http://192.168.1.1", "insecureTls": False}
-        
-        result = memon.check_router(router_check, 2500)
-        self.assertTrue(result)
-        mock_https.assert_called_once_with("http://192.168.1.1", False, 2500)
-    
-    @patch('memon.check_router_ping')
-    def test_check_router_ping_host_with_protocol(self, mock_ping):
-        """Test PING router check with host that has protocol prefix (should strip it)."""
-        mock_ping.return_value = True
-        router_check = {"type": "ping", "host": "https://192.168.1.1", "pingCount": 1}
-        
-        result = memon.check_router(router_check, 2500)
-        self.assertTrue(result)
-        mock_ping.assert_called_once_with("192.168.1.1", 1, 2500)
-    
-    @patch('memon.check_router_ping')
-    def test_check_router_ping_host_with_http_protocol(self, mock_ping):
-        """Test PING router check with host that has http:// protocol prefix (should strip it)."""
-        mock_ping.return_value = True
-        router_check = {"type": "ping", "host": "http://192.168.1.1", "pingCount": 1}
-        
-        result = memon.check_router(router_check, 2500)
-        self.assertTrue(result)
-        mock_ping.assert_called_once_with("192.168.1.1", 1, 2500)
+        mock_https.assert_called_once_with("https://192.168.1.1:443", False, 2500)
 
 
 class TestDNSChecks(unittest.TestCase):
     """Test DNS check functionality."""
     
-    @patch('subprocess.run')
-    def test_check_dns_success_dig(self, mock_run):
-        """Test successful DNS check using dig."""
-        mock_run.return_value = Mock(returncode=0, stdout="8.8.8.8\n", stderr="")
+    @patch('dns.resolver.Resolver')
+    def test_check_dns_success(self, mock_resolver_class):
+        """Test successful DNS check using dnspython."""
+        mock_resolver = Mock()
+        mock_resolver_class.return_value = mock_resolver
+        mock_answer = Mock()
+        mock_resolver.resolve.return_value = mock_answer
         
         success, _ = memon.check_dns("8.8.8.8", "google.com", "A", 2500)
         self.assertTrue(success)
+        mock_resolver_class.assert_called_once_with(configure=False)
+        self.assertEqual(mock_resolver.nameservers, ["8.8.8.8"])
+        mock_resolver.resolve.assert_called_once()
     
-    @patch('subprocess.run')
-    def test_check_dns_failure(self, mock_run):
+    @patch('dns.resolver.Resolver')
+    def test_check_dns_failure(self, mock_resolver_class):
         """Test failed DNS check."""
-        mock_run.return_value = Mock(returncode=1, stdout="", stderr="")
+        mock_resolver = Mock()
+        mock_resolver_class.return_value = mock_resolver
+        mock_resolver.resolve.side_effect = dns.resolver.NXDOMAIN()
         
         success, _ = memon.check_dns("8.8.8.8", "google.com", "A", 2500)
         self.assertFalse(success)
     
-    @patch('subprocess.run')
-    def test_check_dns_timeout(self, mock_run):
+    @patch('dns.resolver.Resolver')
+    def test_check_dns_timeout(self, mock_resolver_class):
         """Test DNS check with timeout."""
-        mock_run.side_effect = subprocess.TimeoutExpired("dig", 1)
+        mock_resolver = Mock()
+        mock_resolver_class.return_value = mock_resolver
+        mock_resolver.resolve.side_effect = dns.exception.Timeout()
         
         success, _ = memon.check_dns("8.8.8.8", "google.com", "A", 2500)
         self.assertFalse(success)
+    
+    @patch('dns.resolver.Resolver')
+    def test_check_dns_no_answer(self, mock_resolver_class):
+        """Test DNS check with no answer."""
+        mock_resolver = Mock()
+        mock_resolver_class.return_value = mock_resolver
+        mock_resolver.resolve.side_effect = dns.resolver.NoAnswer()
+        
+        success, _ = memon.check_dns("8.8.8.8", "google.com", "A", 2500)
+        self.assertFalse(success)
+    
+    @patch('dns.resolver.Resolver')
+    def test_check_dns_aaaa_record(self, mock_resolver_class):
+        """Test DNS check with AAAA record type."""
+        mock_resolver = Mock()
+        mock_resolver_class.return_value = mock_resolver
+        mock_answer = Mock()
+        mock_resolver.resolve.return_value = mock_answer
+        
+        success, _ = memon.check_dns("1.1.1.1", "google.com", "AAAA", 2500)
+        self.assertTrue(success)
+        # Verify AAAA was used
+        call_args = mock_resolver.resolve.call_args
+        self.assertEqual(call_args[0][1], dns.rdatatype.AAAA)
     
     @patch('memon.check_dns')
     def test_check_all_dns_all_pass(self, mock_check_dns):
@@ -914,218 +984,6 @@ class TestEmitAlert(unittest.TestCase):
             self.assertEqual(len(call_args["response"]), 200)
 
 
-class TestCommandAvailability(unittest.TestCase):
-    """Test command availability checking functionality."""
-    
-    @patch('shutil.which')
-    def test_check_command_available_true(self, mock_which):
-        """Test check_command_available returns True when command exists."""
-        mock_which.return_value = "/usr/bin/ping"
-        result = memon.check_command_available("ping")
-        self.assertTrue(result)
-        mock_which.assert_called_once_with("ping")
-    
-    @patch('shutil.which')
-    def test_check_command_available_false(self, mock_which):
-        """Test check_command_available returns False when command doesn't exist."""
-        mock_which.return_value = None
-        result = memon.check_command_available("nonexistent")
-        self.assertFalse(result)
-        mock_which.assert_called_once_with("nonexistent")
-    
-    @patch('memon.save_state')
-    @patch('memon.load_state')
-    @patch('memon.load_config')
-    @patch('memon.check_command_available')
-    @patch('sys.exit')
-    def test_main_fails_when_ping_missing(self, mock_exit, mock_check_cmd, mock_load_config,
-                                          mock_load_state, mock_save_state):
-        """Test main() fails early when ping is missing but routerCheck.type='ping'."""
-        mock_load_config.return_value = {
-            "timeoutMs": 2500,
-            "mustFailCount": 3,
-            "alertBackoffSeconds": 900,
-            "messages": {},
-            "routerCheck": {"type": "ping", "host": "192.168.1.1"},
-            "dnsChecks": []
-        }
-        mock_load_state.return_value = {
-            "failStreak": 0,
-            "downNotified": False,
-            "lastAlertTs": 0
-        }
-        # ping not available
-        def check_side_effect(cmd):
-            return cmd != "ping"
-        mock_check_cmd.side_effect = check_side_effect
-        
-        memon.main()
-        mock_exit.assert_called_once_with(1)
-        mock_save_state.assert_not_called()
-    
-    @patch('memon.save_state')
-    @patch('memon.load_state')
-    @patch('memon.load_config')
-    @patch('memon.check_command_available')
-    @patch('sys.exit')
-    def test_main_fails_when_dns_commands_missing(self, mock_exit, mock_check_cmd, mock_load_config,
-                                                   mock_load_state, mock_save_state):
-        """Test main() fails early when dig/nslookup missing but dnsChecks configured."""
-        mock_load_config.return_value = {
-            "timeoutMs": 2500,
-            "mustFailCount": 3,
-            "alertBackoffSeconds": 900,
-            "messages": {},
-            "routerCheck": {"type": "https", "host": "https://192.168.1.1"},
-            "dnsChecks": [
-                {"name": "DNS1", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"}
-            ]
-        }
-        mock_load_state.return_value = {
-            "failStreak": 0,
-            "downNotified": False,
-            "lastAlertTs": 0
-        }
-        # Neither dig nor nslookup available
-        mock_check_cmd.return_value = False
-        
-        memon.main()
-        mock_exit.assert_called_once_with(1)
-        mock_save_state.assert_not_called()
-    
-    @patch('memon.save_state')
-    @patch('memon.load_state')
-    @patch('memon.load_config')
-    @patch('memon.check_command_available')
-    @patch('memon.check_router')
-    @patch('memon.check_all_dns')
-    def test_main_continues_when_commands_available(self, mock_check_dns, mock_check_router,
-                                                     mock_check_cmd, mock_load_config,
-                                                     mock_load_state, mock_save_state):
-        """Test main() continues normally when commands are available."""
-        mock_load_config.return_value = {
-            "timeoutMs": 2500,
-            "mustFailCount": 3,
-            "alertBackoffSeconds": 900,
-            "messages": {},
-            "routerCheck": {"type": "ping", "host": "192.168.1.1"},
-            "dnsChecks": [
-                {"name": "DNS1", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"}
-            ]
-        }
-        mock_load_state.return_value = {
-            "failStreak": 0,
-            "downNotified": False,
-            "lastAlertTs": 0
-        }
-        # All commands available
-        mock_check_cmd.return_value = True
-        mock_check_router.return_value = True
-        mock_check_dns.return_value = ([], ["DNS1"])
-        
-        memon.main()
-        mock_save_state.assert_called_once()
-    
-    @patch('memon.save_state')
-    @patch('memon.load_state')
-    @patch('memon.load_config')
-    @patch('memon.check_command_available')
-    @patch('memon.check_router')
-    @patch('memon.check_all_dns')
-    def test_main_continues_when_commands_not_needed(self, mock_check_dns, mock_check_router,
-                                                     mock_check_cmd, mock_load_config,
-                                                     mock_load_state, mock_save_state):
-        """Test main() continues normally when commands not needed (HTTPS router, no DNS)."""
-        mock_load_config.return_value = {
-            "timeoutMs": 2500,
-            "mustFailCount": 3,
-            "alertBackoffSeconds": 900,
-            "messages": {},
-            "routerCheck": {"type": "https", "host": "https://192.168.1.1"},
-            "dnsChecks": []
-        }
-        mock_load_state.return_value = {
-            "failStreak": 0,
-            "downNotified": False,
-            "lastAlertTs": 0
-        }
-        mock_check_router.return_value = True
-        mock_check_dns.return_value = ([], [])
-        
-        memon.main()
-        # check_command_available should not be called since no commands are needed
-        mock_check_cmd.assert_not_called()
-        mock_save_state.assert_called_once()
-    
-    @patch('memon.save_state')
-    @patch('memon.load_state')
-    @patch('memon.load_config')
-    @patch('memon.check_command_available')
-    @patch('memon.check_router')
-    @patch('memon.check_all_dns')
-    def test_main_continues_when_dig_available(self, mock_check_dns, mock_check_router,
-                                               mock_check_cmd, mock_load_config,
-                                               mock_load_state, mock_save_state):
-        """Test main() continues when dig is available (nslookup not needed)."""
-        mock_load_config.return_value = {
-            "timeoutMs": 2500,
-            "mustFailCount": 3,
-            "alertBackoffSeconds": 900,
-            "messages": {},
-            "routerCheck": {"type": "https", "host": "https://192.168.1.1"},
-            "dnsChecks": [
-                {"name": "DNS1", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"}
-            ]
-        }
-        mock_load_state.return_value = {
-            "failStreak": 0,
-            "downNotified": False,
-            "lastAlertTs": 0
-        }
-        # dig available, nslookup not needed
-        def check_side_effect(cmd):
-            return cmd == "dig"
-        mock_check_cmd.side_effect = check_side_effect
-        mock_check_router.return_value = True
-        mock_check_dns.return_value = ([], ["DNS1"])
-        
-        memon.main()
-        mock_save_state.assert_called_once()
-    
-    @patch('memon.save_state')
-    @patch('memon.load_state')
-    @patch('memon.load_config')
-    @patch('memon.check_command_available')
-    @patch('memon.check_router')
-    @patch('memon.check_all_dns')
-    def test_main_continues_when_nslookup_available(self, mock_check_dns, mock_check_router,
-                                                    mock_check_cmd, mock_load_config,
-                                                    mock_load_state, mock_save_state):
-        """Test main() continues when nslookup is available (dig not needed)."""
-        mock_load_config.return_value = {
-            "timeoutMs": 2500,
-            "mustFailCount": 3,
-            "alertBackoffSeconds": 900,
-            "messages": {},
-            "routerCheck": {"type": "https", "host": "https://192.168.1.1"},
-            "dnsChecks": [
-                {"name": "DNS1", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"}
-            ]
-        }
-        mock_load_state.return_value = {
-            "failStreak": 0,
-            "downNotified": False,
-            "lastAlertTs": 0
-        }
-        # nslookup available, dig not needed
-        def check_side_effect(cmd):
-            return cmd == "nslookup"
-        mock_check_cmd.side_effect = check_side_effect
-        mock_check_router.return_value = True
-        mock_check_dns.return_value = ([], ["DNS1"])
-        
-        memon.main()
-        mock_save_state.assert_called_once()
 
 
 if __name__ == '__main__':

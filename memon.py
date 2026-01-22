@@ -13,15 +13,22 @@ Implements failure streak tracking with backoff logic.
 
 import json
 import os
-import shutil
 import sys
-import subprocess
+import socket
 import time
 import ssl
 import urllib.request
 import urllib.error
 from typing import Dict, List, Optional, Tuple, Any
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+try:
+    import dns.resolver
+    import dns.exception
+    import dns.rdatatype
+except ImportError as e:
+    print(f"Error: Required library 'dnspython' is not installed. Install it with: pip install dnspython", file=sys.stderr)
+    print(f"ImportError details: {e}", file=sys.stderr)
+    sys.exit(1)
 
 
 # Default configuration values
@@ -36,10 +43,10 @@ DEFAULT_CONFIG = {
         "recovery": "Network connectivity restored"
     },
     "routerCheck": {
-        "type": "https",
-        "host": "https://192.168.1.1",
-        "insecureTls": False,
-        "pingCount": 1
+        "method": "https",
+        "host": "192.168.1.1",
+        "port": 443,
+        "insecureTls": False
     },
     "dnsChecks": []
 }
@@ -75,19 +82,6 @@ def _get_script_dir() -> str:
 
 # Script directory for resolving relative paths
 SCRIPT_DIR = _get_script_dir()
-
-
-def check_command_available(cmd: str) -> bool:
-    """
-    Check if a command is available in the system PATH.
-    
-    Args:
-        cmd: Command name to check (e.g., 'ping', 'dig', 'nslookup')
-        
-    Returns:
-        True if command is available, False otherwise
-    """
-    return shutil.which(cmd) is not None
 
 
 def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
@@ -219,77 +213,64 @@ def check_router_https(url: str, insecure_tls: bool, timeout_ms: int) -> bool:
         return False
 
 
-def check_router_ping(host: str, count: int, timeout_ms: int) -> bool:
+def check_router_http(url: str, timeout_ms: int) -> bool:
     """
-    Check router via ping command.
+    Check router via HTTP request.
     
     Args:
-        host: Hostname or IP address to ping
-        count: Number of ping packets to send
-        timeout_ms: Timeout in milliseconds (per packet)
+        url: HTTP URL to check
+        timeout_ms: Request timeout in milliseconds
         
     Returns:
-        True if ping succeeds, False otherwise
+        True if router responds successfully, False otherwise
     """
     try:
-        # Determine ping command based on OS
-        if sys.platform.startswith('win'):
-            # Windows: ping -n count -w timeout_ms host
-            cmd = ['ping', '-n', str(count), '-w', str(timeout_ms), host]
-        else:
-            # Unix/Linux: ping -c count -W timeout_sec host
-            timeout_sec = max(1, timeout_ms // 1000)
-            cmd = ['ping', '-c', str(count), '-W', str(timeout_sec), host]
+        # Create request with timeout
+        req = urllib.request.Request(url)
+        timeout_sec = timeout_ms / 1000.0
         
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=(timeout_ms * count) / 1000.0 + 1
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        with urllib.request.urlopen(req, timeout=timeout_sec) as response:
+            # Any 2xx or 3xx response is considered success
+            return 200 <= response.getcode() < 400
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError):
         return False
     # Catch any other unexpected exceptions to prevent script crash
     except Exception:
         return False
 
 
-def _strip_protocol(host: str) -> str:
+def check_router_tcp(host: str, timeout_ms: int, port: int = 80) -> bool:
     """
-    Strip protocol prefix from host string.
+    Check router via TCP socket connection test.
+    
+    Uses TCP socket connection instead of ICMP ping to avoid requiring root privileges.
+    Tests connectivity by attempting to establish a TCP connection to the router.
     
     Args:
-        host: Host string that may contain http:// or https:// prefix
+        host: Hostname or IP address to test
+        timeout_ms: Timeout in milliseconds per connection attempt
+        port: TCP port to connect to (default: 80)
         
     Returns:
-        Host string without protocol prefix
+        True if TCP connection succeeds, False otherwise
     """
-    if host.startswith("http://"):
-        return host[7:]
-    elif host.startswith("https://"):
-        return host[8:]
-    return host
-
-
-def _normalize_url(host: str) -> str:
-    """
-    Normalize host to URL format, adding https:// if no protocol specified.
-    
-    Args:
-        host: Host string that may or may not have protocol prefix
+    try:
+        timeout_sec = timeout_ms / 1000.0
         
-    Returns:
-        URL string with protocol prefix
-    """
-    if not host.startswith("http://") and not host.startswith("https://"):
-        return "https://" + host
-    return host
+        # Attempt TCP connection
+        sock = socket.create_connection((host, port), timeout=timeout_sec)
+        sock.close()
+        return True
+    except (socket.timeout, socket.error, OSError, ValueError):
+        return False
+    # Catch any other unexpected exceptions to prevent script crash
+    except Exception:
+        return False
 
 
 def check_router(router_check: Dict[str, Any], timeout_ms: int) -> bool:
     """
-    Perform router check (HTTPS or PING).
+    Perform router check (HTTPS, HTTP, or TCP socket connection).
     
     Args:
         router_check: Router check configuration
@@ -298,23 +279,30 @@ def check_router(router_check: Dict[str, Any], timeout_ms: int) -> bool:
     Returns:
         True if router check passes, False otherwise
     """
-    check_type = router_check.get("type", "https").lower()
+    method = router_check.get("method", "https").lower()
+    host = router_check.get("host", "192.168.1.1")
+    port = router_check.get("port")  # None if not specified
     
-    if check_type == "ping":
-        host = router_check.get("host", "192.168.1.1")
-        host = _strip_protocol(host)
-        count = router_check.get("pingCount", 1)
-        return check_router_ping(host, count, timeout_ms)
-    else:  # default to https
-        host = router_check.get("host", "192.168.1.1")
-        url = _normalize_url(host)
+    if method == "tcp":
+        if port is None:
+            port = 80
+        return check_router_tcp(host, timeout_ms, port)
+    elif method == "http":
+        if port is None:
+            port = 80
+        url = f"http://{host}:{port}"
+        return check_router_http(url, timeout_ms)
+    else:  # https (default)
+        if port is None:
+            port = 443
+        url = f"https://{host}:{port}"
         insecure_tls = router_check.get("insecureTls", False)
         return check_router_https(url, insecure_tls, timeout_ms)
 
 
 def check_dns(server: str, qname: str, rrtype: str, timeout_ms: int) -> Tuple[bool, str]:
     """
-    Check single DNS resolver using subprocess (nslookup or dig).
+    Check single DNS resolver using dnspython library.
     
     Args:
         server: DNS server IP address
@@ -325,38 +313,27 @@ def check_dns(server: str, qname: str, rrtype: str, timeout_ms: int) -> Tuple[bo
     Returns:
         Tuple of (success: bool, name: str for error reporting)
     """
-    timeout_sec = max(1, timeout_ms // 1000)
-    
-    # Try dig first (more reliable), fall back to nslookup
-    for cmd_type in ['dig', 'nslookup']:
-        try:
-            if cmd_type == 'dig':
-                # dig @server -t rrtype qname +short +timeout=timeout_sec
-                cmd = ['dig', f'@{server}', '-t', rrtype, qname, '+short', f'+timeout={timeout_sec}']
-            else:  # nslookup
-                # nslookup -type=rrtype qname server
-                if sys.platform.startswith('win'):
-                    cmd = ['nslookup', '-type=' + rrtype, qname, server]
-                else:
-                    cmd = ['nslookup', '-type=' + rrtype, qname, server]
-            
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout_sec + 1,
-                text=True
-            )
-            
-            if result.returncode == 0 and result.stdout.strip():
-                return True, ""
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            continue
-        # Catch any other unexpected exceptions to prevent script crash
-        except Exception:
-            continue
-    
-    return False, ""
+    try:
+        timeout_sec = timeout_ms / 1000.0
+        
+        # Create resolver with custom nameserver
+        resolver = dns.resolver.Resolver(configure=False)
+        resolver.nameservers = [server]
+        resolver.timeout = timeout_sec
+        resolver.lifetime = timeout_sec
+        
+        # Convert rrtype string to dns.rdatatype
+        rrtype_enum = dns.rdatatype.from_text(rrtype.upper())
+        
+        # Query DNS
+        resolver.resolve(qname, rrtype_enum, lifetime=timeout_sec)
+        return True, ""
+    except (dns.exception.DNSException, dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, 
+            dns.exception.Timeout, OSError, ValueError):
+        return False, ""
+    # Catch any other unexpected exceptions to prevent script crash
+    except Exception:
+        return False, ""
 
 
 def check_all_dns(dns_checks: List[Dict[str, Any]], timeout_ms: int, max_total_time: float) -> Tuple[List[str], List[str]]:
@@ -633,20 +610,6 @@ def main() -> None:
     last_status = state.get("lastStatus", None)
     last_failed_dns = state.get("lastFailedDns", [])
     
-    # Validate required commands are available
-    router_check_type = router_check.get("type", "https").lower()
-    if router_check_type == "ping":
-        if not check_command_available("ping"):
-            print("Error: 'ping' command not found. Install it or use routerCheck.type='https'", file=sys.stderr)
-            sys.exit(1)
-            return  # Early return when commands missing (for test compatibility)
-    
-    if dns_checks:
-        if not check_command_available("dig") and not check_command_available("nslookup"):
-            print("Error: Neither 'dig' nor 'nslookup' command found. Install at least one (e.g., 'sudo apt install bind9-dnsutils' on Debian/Ubuntu)", file=sys.stderr)
-            sys.exit(1)
-            return  # Early return when commands missing (for test compatibility)
-    
     # Calculate remaining time (ensure we finish before MeshMonitor timeout)
     elapsed = time.time() - start_time
     remaining_time = MESHMONITOR_TIMEOUT - elapsed - TIMEOUT_SAFETY_MARGIN
@@ -709,4 +672,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"Error: Unexpected error in main(): {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)

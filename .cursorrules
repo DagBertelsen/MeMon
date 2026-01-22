@@ -21,7 +21,9 @@ This project implements a Python Auto-Responder script for MeshMonitor that moni
 
 ### Code Standards
 - **Language**: Python 3.5+ (standard library preferred, minimal dependencies)
-- **Dependencies**: Prefer standard library (`urllib`, `subprocess`, `json`, `ssl`, `time`, `concurrent.futures`)
+- **Dependencies**: Prefer standard library (`urllib`, `json`, `ssl`, `time`, `concurrent.futures`, `socket`)
+- **Third-party libraries**: `dnspython` is acceptable for DNS operations (no CLI commands allowed)
+- **CLI Commands Prohibition**: **DO NOT use CLI commands** (`subprocess.run`, `subprocess.Popen`, etc.) for network operations. Use Python libraries only (e.g., `socket` for connectivity tests, `dnspython` for DNS queries)
 - **Type Hints**: Use Python 3.5+ compatible type hints
 - **Documentation**: All functions must have docstrings
 - **Error Handling**: Graceful handling of network errors, timeouts, and file I/O
@@ -37,28 +39,38 @@ This project implements a Python Auto-Responder script for MeshMonitor that moni
 - `load_config()` - Load and validate config with defaults
 - `load_state()` - Load state file or create default
 - `save_state()` - Write state to JSON file
-- `check_router()` - Perform router check (HTTPS or PING)
-- `check_dns()` - Check single DNS resolver using subprocess
+- `check_router()` - Perform router check (HTTPS, HTTP, or TCP socket connection)
+- `check_router_https()` - Check router via HTTPS request
+- `check_router_http()` - Check router via HTTP request
+- `check_router_tcp()` - Check router via TCP socket connection
+- `check_dns()` - Check single DNS resolver using dnspython library
 - `check_all_dns()` - Check all DNS resolvers in parallel (with timeout)
 - `classify_status()` - Determine status classification
 - `should_fire_down_alert()` - Check if DOWN alert should fire
 - `should_fire_up_alert()` - Check if UP alert should fire
+- `should_fire_partial_recovery_alert()` - Check if partial recovery alert should fire
+- `replace_placeholders()` - Replace placeholders in message templates
 - `emit_alert()` - Output JSON to stdout
 - `main()` - Orchestrate checks and alert logic with timeout protection
 
 ### Alert Logic
 - **DOWN alert fires when**: `failStreak >= mustFailCount` AND `downNotified == false` AND backoff elapsed
 - **UP alert fires when**: All checks pass AND `downNotified == true`
+- **Partial Recovery alert fires when**: Network partially recovers (bypasses backoff):
+  - Router recovers but DNS issues remain (routerDown → ispDown/upstreamDnsDown)
+  - All DNS failed → some DNS recovered (ispDown → upstreamDnsDown)
+  - Some DNS recovered (upstreamDnsDown → upstreamDnsDown with fewer failures)
 - Only emit JSON to stdout when alert fires, otherwise exit silently
 
 ### Testing Requirements
 - All functions must be tested
-- Mock external dependencies (`urllib.request`, `subprocess`, `json`, `os.path`)
-- Test router checks (HTTPS success/failure, PING success/failure)
+- Mock external dependencies (`urllib.request`, `socket`, `dns.resolver`, `json`, `os.path`)
+- Test router checks (HTTPS success/failure, HTTP success/failure, TCP socket connection success/failure)
 - Test DNS checks (all pass, all fail, partial failure)
 - Test failure streak logic (mustFailCount threshold)
 - Test backoff logic (time-based suppression)
 - Test recovery logic (UP after DOWN)
+- Test partial recovery logic (routerDown → ispDown/upstreamDnsDown, ispDown → upstreamDnsDown, upstreamDnsDown with fewer failures)
 - Test placeholder replacement in messages
 - Test state file creation and updates
 - Test clock skew protection
@@ -70,7 +82,7 @@ This project implements a Python Auto-Responder script for MeshMonitor that moni
 - `mustFailCount`: Consecutive failures before alerting
 - `alertBackoffSeconds`: Minimum time between alerts
 - `messages`: Alert message templates (routerDown, ispDown, upstreamDnsDown, recovery)
-- `routerCheck`: Router check config (type: https|ping, url, insecureTls, host, pingCount)
+- `routerCheck`: Router check config (method: https|http|tcp, host, port, insecureTls)
 - `dnsChecks`: Array of DNS check configs (name, server, qname, rrtype)
 
 ### Error Handling
@@ -79,7 +91,7 @@ This project implements a Python Auto-Responder script for MeshMonitor that moni
 - Network timeouts → respect `timeoutMs` per check, ensure total < 10s
 - Clock skew → clamp `lastAlertTs` if in future
 - DNS/HTTPS errors → treat as failures, continue checking
-- Subprocess errors → handle gracefully, treat as DNS failure
+- DNS library errors → handle gracefully, treat as DNS failure
 
 ## Development Guidelines
 
@@ -96,7 +108,8 @@ This project implements a Python Auto-Responder script for MeshMonitor that moni
 
 ### Code Review Checklist
 - [ ] All tests pass
-- [ ] No new dependencies added (or minimal, well-justified)
+- [ ] No new dependencies added (or minimal, well-justified - `dnspython` is acceptable)
+- [ ] No CLI commands used (use Python libraries only)
 - [ ] Timeout protection maintained (< 10s total)
 - [ ] Error handling is graceful
 - [ ] Documentation updated if needed

@@ -6,7 +6,7 @@ A Python Auto-Responder script for MeshMonitor that monitors home network health
 
 This script continuously monitors your network infrastructure:
 
-- **Router Health**: Checks router connectivity via HTTPS or PING
+- **Router Health**: Checks router connectivity via HTTPS, HTTP, or TCP socket connection
 - **DNS Resolver Health**: Monitors multiple DNS resolvers (e.g., ISP DNS, Google, Cloudflare)
 - **Smart Alerting**: Only sends alerts when:
   - Failures reach a configurable threshold (`mustFailCount`)
@@ -26,9 +26,9 @@ The script uses failure streak tracking to distinguish between transient network
 ## Prerequisites
 
 - **Python**: Version 3.5 or higher
+- **Python Dependencies**: 
+  - `dnspython` library (install via `pip install dnspython` or `pip install -r requirements.txt`)
 - **System Requirements**:
-  - `ping` command available (Windows, Linux, macOS)
-  - `dig` or `nslookup` command available for DNS checks (optional, script tries both)
   - Network access to router and DNS servers
 - **MeshMonitor**: Running instance with Auto Responder feature enabled
 
@@ -48,7 +48,21 @@ cp memon.py /data/scripts/memon.py
 chmod +x /data/scripts/memon.py
 ```
 
-### 3. Copy Configuration File
+### 3. Install Dependencies
+
+Install required Python dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Or install directly:
+
+```bash
+pip install dnspython
+```
+
+### 4. Copy Configuration File
 
 Copy the configuration file to an appropriate location (e.g., `/data/scripts/`):
 
@@ -58,7 +72,7 @@ cp memon.config.json /data/scripts/memon.config.json
 
 **Note**: The script looks for `memon.config.json` in the current working directory. You may need to adjust the path in the script or ensure the config file is in the same directory as the script.
 
-### 4. Edit Configuration
+### 5. Edit Configuration
 
 Edit `memon.config.json` to match your network setup (see Configuration section below).
 
@@ -80,10 +94,10 @@ The script uses `memon.config.json` for all configuration. If the file doesn't e
     "recovery": "Network connectivity restored"
   },
   "routerCheck": {
-    "type": "https|ping",
-    "host": "https://192.168.1.1",
-    "insecureTls": false,
-    "pingCount": 1
+    "method": "https|http|tcp",
+    "host": "192.168.1.1",
+    "port": 443,
+    "insecureTls": false
   },
   "dnsChecks": [
     {
@@ -119,12 +133,19 @@ Customize alert messages for different failure scenarios:
 
 Configure how the script checks router connectivity:
 
-- **`type`** (string, required): `"https"` or `"ping"`
-- **`host`** (string, required): Router hostname, IP address, or full URL
-  - For `type: "https"`: Can be a full URL (e.g., `"https://192.168.1.1"`) or just hostname/IP (will auto-prepend `https://`)
-  - For `type: "ping"`: Hostname or IP address (protocol prefix will be stripped if present)
-- **`insecureTls`** (boolean, default: false): If `true`, disables TLS certificate validation (useful for routers with self-signed certificates). Only used when `type` is `"https"`.
-- **`pingCount`** (integer, default: 1): Number of ping packets to send (only used when `type` is `"ping"`)
+- **`method`** (string, default: `"https"`): Connection method to use
+  - `"https"`: Uses HTTPS request to check router connectivity (default port: 443)
+  - `"http"`: Uses HTTP request to check router connectivity (default port: 80)
+  - `"tcp"`: Uses TCP socket connection test (default port: 80). Does not require root privileges, unlike ICMP ping.
+- **`host`** (string, required): Router hostname or IP address (no protocol prefix)
+  - Examples: `"192.168.1.1"`, `"router.local"`
+- **`port`** (integer, optional): Port number to connect to
+  - Defaults based on method:
+    - `https`: defaults to 443
+    - `http`: defaults to 80
+    - `tcp`: defaults to 80
+  - Can be specified for custom ports (e.g., `8080`, `8443`)
+- **`insecureTls`** (boolean, default: false): If `true`, disables TLS certificate validation (useful for routers with self-signed certificates). Only used when `method` is `"https"`.
 
 #### DNS Checks
 
@@ -151,8 +172,9 @@ Array of DNS resolver checks to perform:
     "recovery": "Network connectivity restored"
   },
   "routerCheck": {
-    "type": "https",
-    "host": "https://192.168.1.1",
+    "method": "https",
+    "host": "192.168.1.1",
+    "port": 443,
     "insecureTls": true
   },
   "dnsChecks": [
@@ -178,17 +200,31 @@ Array of DNS resolver checks to perform:
 }
 ```
 
-#### PING Router Check
+#### TCP Socket Connection Router Check
 
 ```json
 {
   "routerCheck": {
-    "type": "ping",
+    "method": "tcp",
     "host": "192.168.1.1",
-    "pingCount": 3
+    "port": 80
   }
 }
 ```
+
+#### HTTP Router Check
+
+```json
+{
+  "routerCheck": {
+    "method": "http",
+    "host": "192.168.1.1",
+    "port": 80
+  }
+}
+```
+
+**Note**: The `"tcp"` method uses TCP socket connection instead of ICMP ping, so it doesn't require root privileges.
 
 #### Aggressive Monitoring (Faster Alerts)
 
@@ -252,9 +288,9 @@ The script path in MeshMonitor should be:
 
 1. **Load Configuration**: Reads `memon.config.json` (or uses defaults)
 2. **Load State**: Reads `memon.state.json` (creates default if missing)
-3. **Check Router**: Performs router check (HTTPS or PING)
+3. **Check Router**: Performs router check (HTTPS or TCP socket connection)
    - If router fails → Classify as "router down", skip DNS checks
-4. **Check DNS** (if router OK): Checks all configured DNS resolvers in parallel
+4. **Check DNS** (if router OK): Checks all configured DNS resolvers in parallel using dnspython library
 5. **Classify Status**: Determines failure type (router down, all DNS failed, some DNS failed, or all OK)
 6. **Update Failure Streak**: Increments on failure, resets on success
 7. **Evaluate Alerts**:
@@ -341,15 +377,14 @@ Partial recovery alerts bypass the backoff period, ensuring you're immediately n
 **Possible Causes**:
 - DNS server addresses are incorrect
 - Firewall blocking DNS queries
-- `dig` or `nslookup` not available on system
+- `dnspython` library not installed
 
 **Solutions**:
 - Verify DNS server IP addresses in configuration
-- Test DNS manually: `dig @8.8.8.8 google.com` or `nslookup google.com 8.8.8.8`
-- Check system has `dig` or `nslookup` installed
+- Ensure `dnspython` is installed: `pip install dnspython`
+- Test DNS manually using Python: `python -c "import dns.resolver; print(dns.resolver.resolve('google.com', 'A', nameserver='8.8.8.8'))"`
 - Try different DNS servers (e.g., 1.1.1.1, 8.8.8.8)
-
-**Note**: The script will fail early with a clear error message to stderr if required commands are missing. For DNS checks, at least one of `dig` or `nslookup` must be available. For ping router checks, `ping` must be available.
+- Check firewall rules allow DNS queries (UDP port 53)
 
 ### Router Check Fails with HTTPS
 
@@ -362,10 +397,12 @@ Partial recovery alerts bypass the backoff period, ensuring you're immediately n
 
 **Solutions**:
 - Set `"insecureTls": true` in router check configuration
-- Try PING check instead: `"type": "ping"` (requires `ping` command to be available)
-- Verify router host/URL is correct and accessible from browser
+- Try TCP socket connection check instead: `"method": "tcp"` (does not require root privileges)
+- Try HTTP instead of HTTPS: `"method": "http"`
+- Verify router host is correct and accessible from browser
+- For TCP socket connection, ensure the router accepts connections on the specified port (default: 80)
 
-**Note**: If using `"type": "ping"`, the `ping` command must be available on the system. The script will fail early with a clear error message if `ping` is missing.
+**Note**: The `"tcp"` method uses TCP socket connection, not ICMP ping, so it doesn't require root privileges or the `ping` command.
 
 ### Script Times Out
 
@@ -374,7 +411,6 @@ Partial recovery alerts bypass the backoff period, ensuring you're immediately n
 **Solutions**:
 - Reduce `timeoutMs` for individual checks
 - Reduce number of DNS checks
-- Reduce `pingCount` for PING router checks
 - Check system performance (high CPU/memory usage can slow checks)
 
 ### Configuration File Not Found
@@ -469,7 +505,7 @@ This project includes automated testing that runs on every commit:
 The test suite covers:
 - Configuration loading and validation
 - State file management
-- Router checks (HTTPS and PING)
+- Router checks (HTTPS, HTTP, and TCP)
 - DNS resolver checks
 - Status classification
 - Alert firing logic (DOWN and UP alerts)
