@@ -111,7 +111,7 @@ The script uses `memon.config.json` for all configuration. The configuration fil
 
 - **`timeoutMs`** (integer, default: 2500): Timeout in milliseconds for each individual check (router and DNS). Total script execution must complete within 10 seconds (MeshMonitor hard limit).
 - **`mustFailCount`** (integer, default: 3): Number of consecutive failures required before sending a DOWN alert. Prevents false positives from transient network issues.
-- **`alertBackoffSeconds`** (integer, default: 900): Minimum time in seconds between alerts. Prevents alert spam during extended outages.
+- **`alertBackoffSeconds`** (integer, default: 900): Minimum time in seconds before the first DOWN alert can fire. Prevents alert spam when services are flapping (rapidly transitioning between up and down). Once the first DOWN alert fires, the `downNotified` flag takes over to prevent repeated alerts during extended outages.
 - **`debug`** (boolean, default: false): If `true`, prints failure messages to stdout for debugging purposes. When `false` (default), only JSON alerts are printed to stdout, ensuring clean output for MeshMonitor. Failure messages include router check failures and DNS check failures with error details.
 
 #### Messages
@@ -292,7 +292,10 @@ The script path in MeshMonitor should be:
 6. **Update Failure Streak**: Increments on failure, resets on success
 7. **Evaluate Alerts**:
    - **DOWN alert fires when**: `failStreak >= mustFailCount` AND `downNotified == false` AND backoff elapsed
+     - Once `downNotified` is set to `true`, no further DOWN alerts will fire until full recovery, regardless of backoff period
+     - The backoff period (`alertBackoffSeconds`) only matters for the first alert; it prevents rapid-fire alerts when services are flapping
    - **UP alert fires when**: All checks pass AND `downNotified == true`
+     - Resets `downNotified` to `false`, allowing future DOWN alerts if issues recur
    - **Partial Recovery alert fires when**: Network partially recovers (bypasses backoff):
      - Router recovers but DNS issues remain (routerDown → ispDown/upstreamDnsDown)
      - All DNS failed → some DNS recovered (ispDown → upstreamDnsDown)
@@ -305,7 +308,12 @@ The script maintains state in `memon.state.json`:
 
 - **`failStreak`**: Current consecutive failure count
 - **`downNotified`**: Whether a DOWN alert was already sent
+  - Once set to `true`, this flag prevents all future DOWN alerts from firing until full recovery
+  - Only resets to `false` when all checks pass (full recovery)
+  - This ensures you receive one alert per outage, not repeated alerts every 15 minutes during extended outages
 - **`lastAlertTs`**: Timestamp of last alert (for backoff calculation)
+  - Used to enforce `alertBackoffSeconds` before the first DOWN alert fires
+  - Once `downNotified` is `true`, backoff is no longer checked for DOWN alerts
 - **`lastStatus`**: Previous status classification (for partial recovery detection)
 - **`lastFailedDns`**: List of DNS resolver names that failed previously (for partial recovery detection)
 
@@ -330,6 +338,45 @@ The script detects and alerts on partial recovery scenarios, providing more gran
 
 Partial recovery alerts bypass the backoff period, ensuring you're immediately notified of status improvements even during extended outages.
 
+### Alert Suppression Logic
+
+The script uses a two-stage alert suppression mechanism to prevent alert spam while ensuring you're notified of real issues:
+
+#### Why We Have This Mechanism
+
+Network services can "flap" - rapidly transitioning between up and down states due to transient issues, network congestion, or intermittent connectivity problems. Without suppression logic, you would receive an alert every time the script runs during a flapping period, resulting in alert spam.
+
+#### Two-Stage Suppression
+
+1. **Backoff Period (`alertBackoffSeconds`)**: Prevents rapid-fire alerts when services are flapping
+   - Before the first DOWN alert fires, the script checks if `alertBackoffSeconds` (default: 900 seconds / 15 minutes) has elapsed since the last alert
+   - This prevents alerting on every single failure during flapping periods
+   - Only applies when `downNotified == false` (before first alert)
+
+2. **`downNotified` Flag**: Prevents repeated alerts during extended outages
+   - Once a DOWN alert fires, `downNotified` is set to `true`
+   - While `downNotified == true`, **no further DOWN alerts will fire**, regardless of backoff period
+   - This ensures you receive one alert per outage, not repeated alerts every 15 minutes
+   - Only resets to `false` when all checks pass (full recovery)
+
+#### Example Scenarios
+
+**Scenario 1: Flapping Service (Up/Down Repeatedly)**
+- Service fails 3 times → First DOWN alert fires (after backoff elapsed)
+- Service recovers briefly, then fails again → No alert (backoff prevents it)
+- Service fails 3 more times → Still no alert (`downNotified` is `true`)
+- Service fully recovers → UP alert fires, `downNotified` resets to `false`
+
+**Scenario 2: Extended Outage**
+- Service fails 3 times → First DOWN alert fires
+- Service remains down for hours → No repeated alerts (`downNotified` blocks them)
+- Service recovers → UP alert fires, `downNotified` resets to `false`
+
+**Scenario 3: Partial Recovery**
+- All DNS fails → DOWN alert fires, `downNotified = true`
+- Some DNS recovers → Partial recovery alert fires (bypasses backoff and `downNotified`)
+- Full recovery → UP alert fires, `downNotified` resets to `false`
+
 ## Troubleshooting
 
 ### Script Doesn't Run
@@ -348,13 +395,15 @@ Partial recovery alerts bypass the backoff period, ensuring you're immediately n
 
 **Possible Causes**:
 - Failure streak hasn't reached `mustFailCount` threshold
-- Backoff period hasn't elapsed since last alert (doesn't apply to partial recovery alerts)
+- Backoff period hasn't elapsed since last alert (only applies before first DOWN alert when `downNotified == false`)
+- `downNotified` is `true` (prevents all subsequent DOWN alerts until full recovery)
 - Script is exiting before checks complete (timeout)
 
 **Solutions**:
-- Check `memon.state.json` to see current `failStreak` value
+- Check `memon.state.json` to see current `failStreak` and `downNotified` values
+- If `downNotified` is `true`, you won't receive more DOWN alerts until full recovery
 - Reduce `mustFailCount` for faster alerts (but more false positives)
-- Reduce `alertBackoffSeconds` for more frequent alerts
+- Reduce `alertBackoffSeconds` for faster first alert (only affects timing of first alert)
 - Increase `timeoutMs` if checks are timing out too quickly
 - Enable `"debug": true` in configuration to see detailed failure messages in stdout (useful for troubleshooting, but note this will interfere with MeshMonitor's JSON parsing)
 
