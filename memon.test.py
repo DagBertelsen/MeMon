@@ -20,14 +20,12 @@ import memon
 class TestConfigLoading(unittest.TestCase):
     """Test configuration loading functionality."""
     
-    def test_load_config_defaults(self):
-        """Test loading config with defaults when file doesn't exist."""
+    def test_load_config_missing_file(self):
+        """Test that load_config errors when config file doesn't exist."""
         with patch('os.path.exists', return_value=False):
-            config = memon.load_config("nonexistent.json")
-            self.assertEqual(config["timeoutMs"], 2500)
-            self.assertEqual(config["mustFailCount"], 3)
-            self.assertIn("routerCheck", config)
-            self.assertIn("dnsChecks", config)
+            with patch('sys.exit') as mock_exit:
+                memon.load_config("nonexistent.json")
+                mock_exit.assert_called_once_with(1)
     
     def test_load_config_from_file(self):
         """Test loading config from existing file."""
@@ -101,6 +99,14 @@ class TestStateLoading(unittest.TestCase):
             written_data = ''.join(call.args[0] for call in mock_file().write.call_args_list)
             parsed = json.loads(written_data)
             self.assertEqual(parsed["failStreak"], 3)
+    
+    def test_save_state_error(self):
+        """Test that save_state exits on write error."""
+        test_state = {"failStreak": 3, "downNotified": True, "lastAlertTs": 1234567890}
+        with patch('builtins.open', side_effect=IOError("Permission denied")):
+            with patch('sys.exit') as mock_exit:
+                memon.save_state(test_state, "test.json")
+                mock_exit.assert_called_once_with(1)
 
 
 class TestRouterChecks(unittest.TestCase):

@@ -63,6 +63,20 @@ TIMEOUT_SAFETY_MARGIN = 0.5
 MAX_MESSAGE_LENGTH = 200
 
 
+def _get_script_dir() -> str:
+    """
+    Get the directory where this script is located.
+    
+    Returns:
+        Absolute path to the script's directory
+    """
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+# Script directory for resolving relative paths
+SCRIPT_DIR = _get_script_dir()
+
+
 def check_command_available(cmd: str) -> bool:
     """
     Check if a command is available in the system PATH.
@@ -76,48 +90,60 @@ def check_command_available(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
-def load_config(config_path: str = "memon.config.json") -> Dict[str, Any]:
+def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """
     Load and validate configuration file with defaults.
     
     Args:
-        config_path: Path to configuration JSON file
+        config_path: Path to configuration JSON file. If None, uses script-relative path.
         
     Returns:
         Configuration dictionary with defaults applied
         
     Raises:
-        SystemExit: If config file exists but is invalid (exits with stderr only)
+        SystemExit: If config file is missing or invalid (exits with stderr only)
     """
+    # Resolve config path relative to script directory if not provided
+    if config_path is None:
+        config_path = os.path.join(SCRIPT_DIR, "memon.config.json")
+    
+    # Check if config file exists
+    if not os.path.exists(config_path):
+        print(f"Error: Missing config file {config_path} (ensure memon.config.json exists in the script directory)", file=sys.stderr)
+        sys.exit(1)
+    
     config = DEFAULT_CONFIG.copy()
     
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                user_config = json.load(f)
-                # Deep merge defaults with user config
-                config.update(user_config)
-                if "messages" in user_config:
-                    config["messages"].update(user_config["messages"])
-                if "routerCheck" in user_config:
-                    config["routerCheck"].update(user_config["routerCheck"])
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"Error loading config file {config_path}: {e}", file=sys.stderr)
-            sys.exit(1)
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            user_config = json.load(f)
+            # Deep merge defaults with user config
+            config.update(user_config)
+            if "messages" in user_config:
+                config["messages"].update(user_config["messages"])
+            if "routerCheck" in user_config:
+                config["routerCheck"].update(user_config["routerCheck"])
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"Error loading config file {config_path}: {e}", file=sys.stderr)
+        sys.exit(1)
     
     return config
 
 
-def load_state(state_path: str = "memon.state.json") -> Dict[str, Any]:
+def load_state(state_path: Optional[str] = None) -> Dict[str, Any]:
     """
     Load state file or create default state if missing.
     
     Args:
-        state_path: Path to state JSON file
+        state_path: Path to state JSON file. If None, uses script-relative path.
         
     Returns:
         State dictionary with defaults applied
     """
+    # Resolve state path relative to script directory if not provided
+    if state_path is None:
+        state_path = os.path.join(SCRIPT_DIR, "memon.state.json")
+    
     state = DEFAULT_STATE.copy()
     
     if os.path.exists(state_path):
@@ -137,19 +163,27 @@ def load_state(state_path: str = "memon.state.json") -> Dict[str, Any]:
     return state
 
 
-def save_state(state: Dict[str, Any], state_path: str = "memon.state.json") -> None:
+def save_state(state: Dict[str, Any], state_path: Optional[str] = None) -> None:
     """
     Write state to JSON file.
     
     Args:
         state: State dictionary to save
-        state_path: Path to state JSON file
+        state_path: Path to state JSON file. If None, uses script-relative path.
+        
+    Raises:
+        SystemExit: If state file cannot be written (exits with stderr only)
     """
+    # Resolve state path relative to script directory if not provided
+    if state_path is None:
+        state_path = os.path.join(SCRIPT_DIR, "memon.state.json")
+    
     try:
         with open(state_path, 'w', encoding='utf-8') as f:
             json.dump(state, f, indent=2)
     except IOError as e:
         print(f"Error saving state file {state_path}: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def check_router_https(url: str, insecure_tls: bool, timeout_ms: int) -> bool:
