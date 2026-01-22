@@ -52,10 +52,10 @@ No external Python dependencies are required. The script uses only Python standa
 
 ### 4. Copy Configuration File
 
-Copy the configuration file to an appropriate location (e.g., `/data/scripts/`):
+Copy the example configuration file to create your configuration:
 
 ```bash
-cp memon.config.json /data/scripts/memon.config.json
+cp memon.config.example.json /data/scripts/memon.config.json
 ```
 
 **Note**: The script looks for `memon.config.json` in the current working directory. You may need to adjust the path in the script or ensure the config file is in the same directory as the script.
@@ -66,7 +66,7 @@ Edit `memon.config.json` to match your network setup (see Configuration section 
 
 ## Configuration
 
-The script uses `memon.config.json` for all configuration. If the file doesn't exist, default values are used.
+The script uses `memon.config.json` for all configuration. The configuration file is required - copy `memon.config.example.json` to `memon.config.json` and customize it for your network setup.
 
 ### Configuration Schema
 
@@ -83,7 +83,7 @@ The script uses `memon.config.json` for all configuration. If the file doesn't e
     "recovery": "Network connectivity restored"
   },
   "routerCheck": {
-    "method": "https|http|tcp",
+    "method": "https",
     "host": "192.168.1.1",
     "port": 443,
     "insecureTls": false
@@ -93,6 +93,12 @@ The script uses `memon.config.json` for all configuration. If the file doesn't e
       "name": "Google DNS",
       "server": "8.8.8.8",
       "qname": "google.com",
+      "rrtype": "A"
+    },
+    {
+      "name": "Cloudflare DNS",
+      "server": "1.1.1.1",
+      "qname": "cloudflare.com",
       "rrtype": "A"
     }
   ]
