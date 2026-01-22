@@ -23,10 +23,10 @@ class TestConfigLoading(unittest.TestCase):
     def test_load_config_missing_file(self):
         """Test that load_config errors when config file doesn't exist."""
         with patch('memon.os.path.exists', return_value=False):
-            with patch('memon.sys.exit', side_effect=SystemExit(1)) as mock_exit:
-                with self.assertRaises(SystemExit):
-                    memon.load_config("nonexistent.json")
-                mock_exit.assert_called_once_with(1)
+            with self.assertRaises(FileNotFoundError) as context:
+                memon.load_config("nonexistent.json")
+            self.assertIn("Missing memon.config.json", str(context.exception))
+            self.assertIn("copy memon.config.example.json", str(context.exception))
     
     def test_load_config_from_file(self):
         """Test loading config from existing file."""

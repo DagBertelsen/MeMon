@@ -2,6 +2,7 @@
   "timeoutMs": 2500,
   "mustFailCount": 3,
   "alertBackoffSeconds": 900,
+  "debug": false,
   "messages": {
     "routerDown": "Router is down",
     "ispDown": "All DNS resolvers failed - ISP may be down",
@@ -12,23 +13,17 @@
     "method": "https",
     "host": "192.168.1.1",
     "port": 443,
-    "insecureTls": true
+    "insecureTls": false
   },
   "dnsChecks": [
     {
-      "name": "Altibox",
-      "server": "109.247.114.4",
-      "qname": "altibox.no",
-      "rrtype": "A"
-    },
-    {
-      "name": "Google",
+      "name": "Google DNS",
       "server": "8.8.8.8",
       "qname": "google.com",
       "rrtype": "A"
     },
     {
-      "name": "Cloudflare",
+      "name": "Cloudflare DNS",
       "server": "1.1.1.1",
       "qname": "cloudflare.com",
       "rrtype": "A"

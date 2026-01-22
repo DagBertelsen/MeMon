@@ -89,7 +89,8 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         Configuration dictionary with defaults applied
         
     Raises:
-        SystemExit: If config file is missing or invalid (exits with stderr only)
+        FileNotFoundError: If config file is missing
+        ValueError: If config file is invalid
     """
     # Resolve config path relative to script directory if not provided
     if config_path is None:
@@ -97,8 +98,7 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     
     # Check if config file exists
     if not os.path.exists(config_path):
-        print(f"Error: Missing config file {config_path} (ensure memon.config.json exists in the script directory)", file=sys.stderr)
-        sys.exit(1)
+        raise FileNotFoundError("Missing memon.config.json (copy memon.config.example.json to memon.config.json)")
     
     config = DEFAULT_CONFIG.copy()
     
