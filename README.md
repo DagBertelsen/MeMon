@@ -1,4 +1,4 @@
-# memon Auto-Responder Script
+# MeMon Auto-Responder Script
 
 A Python Auto-Responder script for MeshMonitor that monitors home network health (router and DNS resolvers) and outputs JSON alerts only when notifications should fire. Implements failure streak tracking with backoff logic to prevent alert spam.
 
@@ -68,6 +68,8 @@ Edit `memon.config.json` to match your network setup (see Configuration section 
 
 The script uses `memon.config.json` for all configuration. The configuration file is required - copy `memon.config.example.json` to `memon.config.json` and customize it for your network setup.
 
+**Note**: The configuration file must be saved as UTF-8 encoding to support non-ASCII characters and emojis in messages.
+
 ### Configuration Schema
 
 ```json
@@ -124,6 +126,8 @@ Customize alert messages for different failure scenarios:
 - **`recovery`**: Message sent when network recovers after being down
 
 **Message Length**: Messages are automatically truncated to 200 characters per MeshMonitor requirements.
+
+**UTF-8 Support**: The script fully supports UTF-8 encoding in configuration files and message output. You can use non-ASCII characters (e.g., accented characters like é, ñ, ü) and emojis (🚨, ⚠️, ✅) in your alert messages. The configuration file is read with UTF-8 encoding, and JSON output preserves these characters without escaping.
 
 #### Router Check
 
@@ -508,6 +512,27 @@ Use placeholders in messages for dynamic content:
 ```
 
 The `{{failed}}` placeholder is replaced with a comma-separated list of failed DNS resolver names.
+
+### UTF-8 and International Characters
+
+The script fully supports UTF-8 encoding, allowing you to use:
+
+- **Non-ASCII characters**: Accented characters (é, ñ, ü, etc.) and other Unicode characters
+- **Emojis**: 🚨, ⚠️, ✅, ❌, 📡, etc.
+
+Example configuration with UTF-8 characters:
+
+```json
+{
+  "messages": {
+    "routerDown": "Router is down 🚨",
+    "ispDown": "All DNS resolvers failed - ISP may be down ⚠️",
+    "recovery": "Network connectivity restored ✅"
+  }
+}
+```
+
+The configuration file must be saved as UTF-8 encoding. JSON output preserves these characters directly without escaping (e.g., `\u00e6`).
 
 ### Monitoring Multiple Networks
 

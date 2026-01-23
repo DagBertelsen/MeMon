@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # mm_meta:
-#   name: memon
+#   name: MeMon
 #   emoji: 🌐
 #   language: Python
 
 """
-memon Auto-Responder Script for MeshMonitor
+MeMon Auto-Responder Script for MeshMonitor
 
 Monitors router and DNS health, outputs JSON alerts only when notifications should fire.
 Implements failure streak tracking with backoff logic.
@@ -22,6 +22,19 @@ import urllib.request
 import urllib.error
 from typing import Dict, List, Optional, Tuple, Any
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+
+
+# Configure stdout/stderr for UTF-8 support
+if hasattr(sys.stdout, 'reconfigure') and sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except (AttributeError, ValueError):
+        pass  # Fallback gracefully if reconfigure fails
+if hasattr(sys.stderr, 'reconfigure') and sys.stderr.encoding != 'utf-8':
+    try:
+        sys.stderr.reconfigure(encoding='utf-8')
+    except (AttributeError, ValueError):
+        pass  # Fallback gracefully if reconfigure fails
 
 
 # Default configuration values
@@ -63,6 +76,11 @@ TIMEOUT_SAFETY_MARGIN = 0.5
 # Maximum alert message length (characters)
 MAX_MESSAGE_LENGTH = 200
 
+# Default port numbers
+DEFAULT_HTTP_PORT = 80
+DEFAULT_HTTPS_PORT = 443
+DEFAULT_DNS_PORT = 53
+
 
 def _get_script_dir() -> str:
     """
@@ -76,6 +94,53 @@ def _get_script_dir() -> str:
 
 # Script directory for resolving relative paths
 SCRIPT_DIR = _get_script_dir()
+
+
+def _ms_to_seconds(ms: int) -> float:
+    """
+    Convert milliseconds to seconds.
+    
+    Args:
+        ms: Time in milliseconds
+        
+    Returns:
+        Time in seconds as float
+    """
+    return ms / 1000.0
+
+
+def _get_default_port(method: str) -> int:
+    """
+    Get default port number for router check method.
+    
+    Args:
+        method: Router check method ("https", "http", or "tcp")
+        
+    Returns:
+        Default port number for the method
+    """
+    method_lower = method.lower()
+    if method_lower == "https":
+        return DEFAULT_HTTPS_PORT
+    elif method_lower == "http" or method_lower == "tcp":
+        return DEFAULT_HTTP_PORT
+    else:
+        return DEFAULT_HTTPS_PORT  # Default to HTTPS port
+
+
+def _log_router_failure(method: str, host: str, port: int, reason: str, debug: bool) -> None:
+    """
+    Log router check failure message if debug mode is enabled.
+    
+    Args:
+        method: Router check method
+        host: Router hostname or IP
+        port: Port number
+        reason: Failure reason
+        debug: If True, print debug message
+    """
+    if debug:
+        print(f"[Router Check] Failed: {method} {host}:{port} - {reason}", file=sys.stdout)
 
 
 def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
@@ -195,7 +260,7 @@ def check_router_https(url: str, insecure_tls: bool, timeout_ms: int) -> bool:
         
         # Create request with timeout
         req = urllib.request.Request(url)
-        timeout_sec = timeout_ms / 1000.0
+        timeout_sec = _ms_to_seconds(timeout_ms)
         
         with urllib.request.urlopen(req, context=ssl_context, timeout=timeout_sec) as response:
             # Any 2xx or 3xx response is considered success
@@ -221,7 +286,7 @@ def check_router_http(url: str, timeout_ms: int) -> bool:
     try:
         # Create request with timeout
         req = urllib.request.Request(url)
-        timeout_sec = timeout_ms / 1000.0
+        timeout_sec = _ms_to_seconds(timeout_ms)
         
         with urllib.request.urlopen(req, timeout=timeout_sec) as response:
             # Any 2xx or 3xx response is considered success
@@ -249,7 +314,7 @@ def check_router_tcp(host: str, timeout_ms: int, port: int = 80) -> bool:
         True if TCP connection succeeds, False otherwise
     """
     try:
-        timeout_sec = timeout_ms / 1000.0
+        timeout_sec = _ms_to_seconds(timeout_ms)
         
         # Attempt TCP connection
         sock = socket.create_connection((host, port), timeout=timeout_sec)
@@ -278,29 +343,27 @@ def check_router(router_check: Dict[str, Any], timeout_ms: int, debug: bool = Fa
     host = router_check.get("host", "192.168.1.1")
     port = router_check.get("port")  # None if not specified
     
+    # Use default port if not specified
+    if port is None:
+        port = _get_default_port(method)
+    
     if method == "tcp":
-        if port is None:
-            port = 80
         result = check_router_tcp(host, timeout_ms, port)
-        if not result and debug:
-            print(f"[Router Check] Failed: {method} {host}:{port} - TCP connection failed", file=sys.stdout)
+        if not result:
+            _log_router_failure(method, host, port, "TCP connection failed", debug)
         return result
     elif method == "http":
-        if port is None:
-            port = 80
         url = f"http://{host}:{port}"
         result = check_router_http(url, timeout_ms)
-        if not result and debug:
-            print(f"[Router Check] Failed: {method} {host}:{port} - HTTP request failed", file=sys.stdout)
+        if not result:
+            _log_router_failure(method, host, port, "HTTP request failed", debug)
         return result
     else:  # https (default)
-        if port is None:
-            port = 443
         url = f"https://{host}:{port}"
         insecure_tls = router_check.get("insecureTls", False)
         result = check_router_https(url, insecure_tls, timeout_ms)
-        if not result and debug:
-            print(f"[Router Check] Failed: {method} {host}:{port} - HTTPS request failed", file=sys.stdout)
+        if not result:
+            _log_router_failure(method, host, port, "HTTPS request failed", debug)
         return result
 
 
@@ -484,7 +547,7 @@ def check_dns(server: str, qname: str, rrtype: str, timeout_ms: int) -> Tuple[bo
         Tuple of (success: bool, error_message: str)
     """
     try:
-        timeout_sec = timeout_ms / 1000.0
+        timeout_sec = _ms_to_seconds(timeout_ms)
         
         # Build DNS query packet
         query = _build_dns_query(qname, rrtype)
@@ -494,8 +557,8 @@ def check_dns(server: str, qname: str, rrtype: str, timeout_ms: int) -> Tuple[bo
         sock.settimeout(timeout_sec)
         
         try:
-            # Send query to DNS server on port 53
-            sock.sendto(query, (server, 53))
+            # Send query to DNS server on default DNS port
+            sock.sendto(query, (server, DEFAULT_DNS_PORT))
             
             # Receive response
             data, _ = sock.recvfrom(512)  # DNS responses are typically < 512 bytes
@@ -566,7 +629,7 @@ def check_all_dns(dns_checks: List[Dict[str, Any]], timeout_ms: int, max_total_t
                 continue
             
             try:
-                success, error_msg = future.result(timeout=min(remaining_time, timeout_ms / 1000.0 + 0.5))
+                success, error_msg = future.result(timeout=min(remaining_time, _ms_to_seconds(timeout_ms) + 0.5))
                 if not success:
                     failed_names.append(name)
                     if debug:
@@ -716,7 +779,7 @@ def emit_alert(message: str) -> None:
         message = message[:MAX_MESSAGE_LENGTH - 3] + "..."
     
     output = {"response": message}
-    print(json.dumps(output))
+    print(json.dumps(output, ensure_ascii=False))
     sys.stdout.flush()
 
 
