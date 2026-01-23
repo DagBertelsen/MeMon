@@ -654,6 +654,60 @@ class TestAlertLogic(unittest.TestCase):
             current_failed_dns=["DNS1", "DNS2"]
         )
         self.assertTrue(result)
+    
+    def test_should_fire_down_alert_auto_responder_immediate(self):
+        """Test DOWN alert fires immediately after 1 failure with Auto Responder config (mustFailCount: 1)."""
+        current_time = int(time.time())
+        result = memon.should_fire_down_alert(
+            fail_streak=1,
+            must_fail_count=1,
+            down_notified=False,
+            last_alert_ts=0,
+            backoff_seconds=0,
+            current_time=current_time
+        )
+        self.assertTrue(result)
+    
+    def test_should_fire_down_alert_auto_responder_no_backoff(self):
+        """Test DOWN alert fires with no backoff delay (alertBackoffSeconds: 0)."""
+        current_time = int(time.time())
+        recent_alert = current_time - 1  # 1 second ago, but backoff is 0
+        result = memon.should_fire_down_alert(
+            fail_streak=1,
+            must_fail_count=1,
+            down_notified=False,
+            last_alert_ts=recent_alert,
+            backoff_seconds=0,
+            current_time=current_time
+        )
+        self.assertTrue(result)
+    
+    def test_should_fire_down_alert_auto_responder_zero_backoff_immediate(self):
+        """Test that with alertBackoffSeconds: 0, alert fires immediately even if lastAlertTs is recent."""
+        current_time = int(time.time())
+        very_recent_alert = current_time - 0  # Just now, backoff is 0
+        result = memon.should_fire_down_alert(
+            fail_streak=1,
+            must_fail_count=1,
+            down_notified=False,
+            last_alert_ts=very_recent_alert,
+            backoff_seconds=0,
+            current_time=current_time
+        )
+        self.assertTrue(result)
+    
+    def test_should_fire_down_alert_auto_responder_below_threshold(self):
+        """Test DOWN alert doesn't fire when below threshold even with Auto Responder config."""
+        current_time = int(time.time())
+        result = memon.should_fire_down_alert(
+            fail_streak=0,
+            must_fail_count=1,
+            down_notified=False,
+            last_alert_ts=0,
+            backoff_seconds=0,
+            current_time=current_time
+        )
+        self.assertFalse(result)
 
 
 class TestPlaceholderReplacement(unittest.TestCase):
@@ -1044,6 +1098,160 @@ class TestMainFunction(unittest.TestCase):
         saved_state = mock_save_state.call_args[0][0]
         self.assertEqual(saved_state["lastStatus"], "upstreamDnsDown")
         self.assertEqual(saved_state["lastFailedDns"], ["DNS1", "DNS2"])
+    
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.load_config')
+    @patch('memon.check_router')
+    @patch('memon.check_all_dns')
+    @patch('memon.emit_alert')
+    def test_main_auto_responder_fire_immediate_alert(self, mock_emit, mock_check_dns, mock_check_router,
+                                                       mock_load_config, mock_load_state, mock_save_state):
+        """Test main function fires alert immediately after 1 failure with Auto Responder config (mustFailCount: 1, alertBackoffSeconds: 0)."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 1,
+            "alertBackoffSeconds": 0,
+            "messages": {"routerDown": "Router is down"},
+            "routerCheck": {},
+            "dnsChecks": []
+        }
+        mock_load_state.return_value = {
+            "failStreak": 0,
+            "downNotified": False,
+            "lastAlertTs": 0
+        }
+        mock_check_router.return_value = False  # Router down
+        mock_check_dns.return_value = ([], [])
+        
+        memon.main()
+        
+        # Verify alert was emitted immediately after 1 failure
+        mock_emit.assert_called_once()
+        call_args = mock_emit.call_args[0][0]
+        self.assertEqual(call_args, "Router is down")
+        # Verify state was saved
+        mock_save_state.assert_called_once()
+        saved_state = mock_save_state.call_args[0][0]
+        self.assertEqual(saved_state["failStreak"], 1)
+        self.assertTrue(saved_state["downNotified"])
+    
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.load_config')
+    @patch('memon.check_router')
+    @patch('memon.check_all_dns')
+    @patch('memon.emit_alert')
+    def test_main_auto_responder_router_down_immediate(self, mock_emit, mock_check_dns, mock_check_router,
+                                                        mock_load_config, mock_load_state, mock_save_state):
+        """Test router down alert fires immediately with Auto Responder config."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 1,
+            "alertBackoffSeconds": 0,
+            "messages": {"routerDown": "Router is down"},
+            "routerCheck": {},
+            "dnsChecks": []
+        }
+        mock_load_state.return_value = {
+            "failStreak": 0,
+            "downNotified": False,
+            "lastAlertTs": 0
+        }
+        mock_check_router.return_value = False  # Router down
+        mock_check_dns.return_value = ([], [])
+        
+        memon.main()
+        
+        # Verify alert was emitted
+        mock_emit.assert_called_once()
+        # Verify state was saved with correct values
+        mock_save_state.assert_called_once()
+        saved_state = mock_save_state.call_args[0][0]
+        self.assertEqual(saved_state["lastStatus"], "routerDown")
+        self.assertTrue(saved_state["downNotified"])
+    
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.load_config')
+    @patch('memon.check_router')
+    @patch('memon.check_all_dns')
+    @patch('memon.emit_alert')
+    def test_main_auto_responder_no_backoff_rapid_fire(self, mock_emit, mock_check_dns, mock_check_router,
+                                                       mock_load_config, mock_load_state, mock_save_state):
+        """Test that with alertBackoffSeconds: 0, alerts can fire immediately (though downNotified flag still prevents duplicates)."""
+        current_time = int(time.time())
+        recent_alert = current_time - 1  # 1 second ago, but backoff is 0
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 1,
+            "alertBackoffSeconds": 0,
+            "messages": {"ispDown": "All DNS resolvers failed - ISP may be down"},
+            "routerCheck": {},
+            "dnsChecks": [
+                {"name": "DNS1", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"},
+                {"name": "DNS2", "server": "1.1.1.1", "qname": "cloudflare.com", "rrtype": "A"}
+            ]
+        }
+        mock_load_state.return_value = {
+            "failStreak": 0,
+            "downNotified": False,
+            "lastAlertTs": recent_alert
+        }
+        mock_check_router.return_value = True
+        # All DNS fail
+        mock_check_dns.return_value = (["DNS1", "DNS2"], ["DNS1", "DNS2"])
+        
+        memon.main()
+        
+        # Verify alert was emitted despite recent lastAlertTs (backoff is 0)
+        mock_emit.assert_called_once()
+        # Verify state was saved
+        mock_save_state.assert_called_once()
+        saved_state = mock_save_state.call_args[0][0]
+        self.assertEqual(saved_state["lastStatus"], "ispDown")
+        self.assertTrue(saved_state["downNotified"])
+    
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.load_config')
+    @patch('memon.check_router')
+    @patch('memon.check_all_dns')
+    @patch('memon.emit_alert')
+    def test_main_auto_responder_dns_failure_immediate(self, mock_emit, mock_check_dns, mock_check_router,
+                                                         mock_load_config, mock_load_state, mock_save_state):
+        """Test DNS failure alert fires immediately with Auto Responder config."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 1,
+            "alertBackoffSeconds": 0,
+            "messages": {"upstreamDnsDown": "DNS resolvers failed: {{failed}}"},
+            "routerCheck": {},
+            "dnsChecks": [
+                {"name": "DNS1", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"},
+                {"name": "DNS2", "server": "1.1.1.1", "qname": "cloudflare.com", "rrtype": "A"}
+            ]
+        }
+        mock_load_state.return_value = {
+            "failStreak": 0,
+            "downNotified": False,
+            "lastAlertTs": 0
+        }
+        mock_check_router.return_value = True
+        # 1 DNS fails
+        mock_check_dns.return_value = (["DNS1"], ["DNS1", "DNS2"])
+        
+        memon.main()
+        
+        # Verify alert was emitted immediately after 1 failure
+        mock_emit.assert_called_once()
+        call_args = mock_emit.call_args[0][0]
+        self.assertIn("DNS1", call_args)
+        # Verify state was saved
+        mock_save_state.assert_called_once()
+        saved_state = mock_save_state.call_args[0][0]
+        self.assertEqual(saved_state["lastStatus"], "upstreamDnsDown")
+        self.assertEqual(saved_state["lastFailedDns"], ["DNS1"])
 
 
 class TestEmitAlert(unittest.TestCase):

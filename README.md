@@ -112,8 +112,8 @@ The script uses `memon.config.json` for all configuration. The configuration fil
 #### Top-Level Settings
 
 - **`timeoutMs`** (integer, default: 2500): Timeout in milliseconds for each individual check (router and DNS). Total script execution must complete within 10 seconds (MeshMonitor hard limit).
-- **`mustFailCount`** (integer, default: 3): Number of consecutive failures required before sending a DOWN alert. Prevents false positives from transient network issues.
-- **`alertBackoffSeconds`** (integer, default: 900): Minimum time in seconds before the first DOWN alert can fire. Prevents alert spam when services are flapping (rapidly transitioning between up and down). Once the first DOWN alert fires, the `downNotified` flag takes over to prevent repeated alerts during extended outages.
+- **`mustFailCount`** (integer, default: 3): Number of consecutive failures required before sending a DOWN alert. Prevents false positives from transient network issues. **See "Use Cases and Configuration" section below for recommended values based on your use case.**
+- **`alertBackoffSeconds`** (integer, default: 900): Minimum time in seconds before the first DOWN alert can fire. Prevents alert spam when services are flapping (rapidly transitioning between up and down). Once the first DOWN alert fires, the `downNotified` flag takes over to prevent repeated alerts during extended outages. **See "Use Cases and Configuration" section below for when this parameter is relevant.**
 - **`debug`** (boolean, default: false): If `true`, prints failure messages to stdout for debugging purposes. When `false` (default), only JSON alerts are printed to stdout, ensuring clean output for MeshMonitor. Failure messages include router check failures and DNS check failures with error details.
 
 #### Messages
@@ -156,9 +156,84 @@ Array of DNS resolver checks to perform:
 - **`qname`** (string, required): Domain name to query (e.g., `"google.com"`)
 - **`rrtype`** (string, default: "A"): DNS record type to query (`"A"` for IPv4, `"AAAA"` for IPv6)
 
+### Use Cases and Configuration
+
+The script can be used in two different ways with MeshMonitor, and the configuration should be adjusted accordingly:
+
+#### Auto Responder (Manual Triggering)
+
+When the script is triggered manually via messages (using MeshMonitor's Auto Responder feature), users control when checks happen:
+
+- **`mustFailCount`**: Should be set to **`1`** for immediate feedback. Since the check is manually triggered, you want to know the current status right away without waiting for multiple consecutive failures.
+- **`alertBackoffSeconds`**: Has little relevance since checks are manually triggered. You can set this to `0` or a minimal value (e.g., `60` seconds) as spam prevention isn't needed when you control when checks run.
+
+**Recommended Configuration for Auto Responder:**
+```json
+{
+  "mustFailCount": 1,
+  "alertBackoffSeconds": 0
+}
+```
+
+#### Timer Triggers (Automated Scheduling)
+
+When the script runs automatically on a schedule (using MeshMonitor's [Timer Triggers](https://meshmonitor.org/features/automation#timer-triggers) feature), these parameters are essential to prevent alert spam and network flooding:
+
+- **`mustFailCount`**: Should be set to **`3`** (or higher) to prevent false positives from transient network issues. Automated runs can catch temporary hiccups that don't warrant alerts.
+- **`alertBackoffSeconds`**: Should be used (e.g., `900` seconds / 15 minutes) to prevent alert spam when services are flapping. This is critical for automated runs to avoid flooding the mesh network with repeated alerts.
+
+**Recommended Configuration for Timer Triggers:**
+```json
+{
+  "mustFailCount": 3,
+  "alertBackoffSeconds": 900
+}
+```
+
 ### Example Configurations
 
-#### HTTPS Router with Multiple DNS Checks
+#### Auto Responder Configuration (Manual Triggering)
+
+Recommended configuration when using the script with MeshMonitor's Auto Responder feature:
+
+```json
+{
+  "timeoutMs": 2500,
+  "mustFailCount": 1,
+  "alertBackoffSeconds": 0,
+  "debug": false,
+  "messages": {
+    "routerDown": "Router is down",
+    "ispDown": "All DNS resolvers failed - ISP may be down",
+    "upstreamDnsDown": "DNS resolvers failed: {{failed}}",
+    "recovery": "Network connectivity restored"
+  },
+  "routerCheck": {
+    "method": "https",
+    "host": "192.168.1.1",
+    "port": 443,
+    "insecureTls": true
+  },
+  "dnsChecks": [
+    {
+      "name": "Google DNS",
+      "server": "8.8.8.8",
+      "qname": "google.com",
+      "rrtype": "A"
+    },
+    {
+      "name": "Cloudflare DNS",
+      "server": "1.1.1.1",
+      "qname": "cloudflare.com",
+      "rrtype": "A"
+    }
+  ]
+}
+```
+
+#### Timer Triggers Configuration (Automated Scheduling)
+
+Recommended configuration when using the script with MeshMonitor's Timer Triggers feature:
 
 ```json
 {
@@ -227,7 +302,9 @@ Array of DNS resolver checks to perform:
 
 **Note**: The `"tcp"` method uses TCP socket connection instead of ICMP ping, so it doesn't require root privileges.
 
-#### Aggressive Monitoring (Faster Alerts)
+#### Aggressive Monitoring (Faster Alerts - Timer Triggers Only)
+
+For Timer Triggers when you want faster alerts (use with caution to avoid spam):
 
 ```json
 {
@@ -237,7 +314,9 @@ Array of DNS resolver checks to perform:
 }
 ```
 
-#### Conservative Monitoring (Fewer False Positives)
+#### Conservative Monitoring (Fewer False Positives - Timer Triggers Only)
+
+For Timer Triggers when you want to minimize false positives:
 
 ```json
 {
@@ -247,9 +326,17 @@ Array of DNS resolver checks to perform:
 }
 ```
 
+**Note**: These aggressive and conservative configurations are only recommended for Timer Triggers. For Auto Responder, always use `mustFailCount: 1` and `alertBackoffSeconds: 0`.
+
 ## MeshMonitor Setup
 
-### 1. Configure Auto Responder Trigger
+The script can be configured in MeshMonitor in two ways: as an **Auto Responder** (manual triggering) or as a **Timer Trigger** (automated scheduling). Choose the method that best fits your needs.
+
+### Option 1: Auto Responder (Manual Triggering)
+
+Use this method when you want to manually trigger network checks by sending messages to your MeshMonitor node.
+
+#### 1. Configure Auto Responder Trigger
 
 1. Navigate to **Settings → Automation → Auto Responder** in MeshMonitor
 2. Click **"Add Trigger"**
@@ -261,13 +348,65 @@ Array of DNS resolver checks to perform:
    - **Response Type**: Select **"Script"**
    - **Script Path**: Enter `/data/scripts/memon.py`
 
-### 2. Example Trigger Patterns
+#### 2. Example Trigger Patterns
 
 - **Simple Command**: `netcheck` - Send "netcheck" to trigger
 - **Question Format**: `network status` - Natural language trigger
-- **Periodic Check**: Use MeshMonitor's scheduled triggers (if available) to run periodically
 
-### 3. Script Path Configuration
+#### 3. Configuration for Auto Responder
+
+When using Auto Responder, configure your `memon.config.json` with:
+- **`mustFailCount`**: Set to `1` for immediate feedback
+- **`alertBackoffSeconds`**: Set to `0` or minimal value (e.g., `60`)
+
+See the "Use Cases and Configuration" section above for details.
+
+#### 4. Testing the Trigger
+
+1. Send a message matching your trigger pattern to your MeshMonitor node
+2. The script will run and check network status
+3. If conditions are met (failures exceed threshold), you'll receive an alert
+4. Otherwise, the script exits silently (no response)
+
+### Option 2: Timer Triggers (Automated Scheduling)
+
+Use this method when you want the script to run automatically on a schedule. This is ideal for continuous monitoring.
+
+#### 1. Configure Timer Trigger
+
+1. Navigate to **Settings → Automation → Timer Triggers** (or **Timed Events**) in MeshMonitor
+2. Click **"Add Timer"** or **"Add"**
+3. Configure the timer:
+   - **Name**: Descriptive name (e.g., "Network Health Check")
+   - **Schedule**: Cron expression defining when to run (e.g., `0 */6 * * *` for every 6 hours)
+   - **Script**: Select or enter `/data/scripts/memon.py`
+   - **Channel**: Select the channel to send alerts to (typically Primary channel, index 0)
+4. Click **"Save"** to persist your changes
+
+#### 2. Example Cron Schedules
+
+- **Every 6 hours**: `0 */6 * * *` - Runs at 12:00 AM, 6:00 AM, 12:00 PM, 6:00 PM
+- **Every hour**: `0 * * * *` - Runs at the top of every hour
+- **Daily at 9 AM**: `0 9 * * *` - Runs once per day at 9:00 AM
+- **Every 15 minutes**: `*/15 * * * *` - Runs every 15 minutes (use with caution)
+
+For help building cron expressions, use [crontab.guru](https://crontab.guru/).
+
+#### 3. Configuration for Timer Triggers
+
+When using Timer Triggers, configure your `memon.config.json` with:
+- **`mustFailCount`**: Set to `3` (or higher) to prevent false positives
+- **`alertBackoffSeconds`**: Set to `900` (15 minutes) or higher to prevent alert spam
+
+These parameters are essential for automated runs to prevent network flooding. See the "Use Cases and Configuration" section above for details.
+
+#### 4. Monitoring Timer Execution
+
+- Check MeshMonitor logs to verify timer execution: `docker logs meshmonitor`
+- Timer status (last run, last result) is displayed in the Timer Triggers interface
+- Ensure the script completes within 10 seconds (MeshMonitor hard limit)
+
+### Script Path Configuration
 
 The script path in MeshMonitor should be:
 ```
@@ -276,12 +415,10 @@ The script path in MeshMonitor should be:
 
 **Important**: Ensure the script has execute permissions (`chmod +x`) and the configuration file is accessible from the script's working directory.
 
-### 4. Testing the Trigger
+### Related Documentation
 
-1. Send a message matching your trigger pattern to your MeshMonitor node
-2. The script will run and check network status
-3. If conditions are met (failures exceed threshold, backoff elapsed), you'll receive an alert
-4. Otherwise, the script exits silently (no response)
+- [MeshMonitor Auto Responder Documentation](https://meshmonitor.org/features/automation#auto-responder)
+- [MeshMonitor Timer Triggers Documentation](https://meshmonitor.org/features/automation#timer-triggers)
 
 ## How It Works
 

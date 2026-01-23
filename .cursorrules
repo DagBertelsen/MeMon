@@ -96,11 +96,10 @@ Popen`, etc.) for network operations. Use Python libraries only (e.g., `socket` 
 ## Development Guidelines
 
 ### When Making Changes
-1. **Always run tests** when making code changes: `python memon.test.py`
-   - Alternative: `python -m unittest discover -s . -p "*.test.py"` (unittest discovery)
+1. **Always run tests** when making code changes: `python memon.test.py -v 2>&1`
+   - Run the test file directly (running as unittest does not work)
    - Tests also run automatically via pre-commit hooks (if installed) and GitHub Actions on push/PR
    - Run tests locally before committing to catch issues early
-   - Note: `python -m unittest memon.test` does not work because `memon.test.py` is a file, not a submodule
 2. **Maintain test coverage** - add tests for new functionality
 3. **Respect MeshMonitor timeout** - ensure total execution < 10 seconds
 4. **Update documentation** if configuration or behavior changes
@@ -125,7 +124,7 @@ Popen`, etc.) for network operations. Use Python libraries only (e.g., `socket` 
 
 ### Git/GitHub Workflow
 - **Commit Guidelines**: 
-  - Always run tests before committing: `python memon.test.py`
+  - Always run tests before committing: `python memon.test.py -v 2>&1`
   - Write clear, descriptive commit messages
   - Commit related changes together (logical units)
   - Do not commit generated files (see `.gitignore`)
@@ -140,6 +139,10 @@ Popen`, etc.) for network operations. Use Python libraries only (e.g., `socket` 
   - Python cache files (`__pycache__/`, `*.pyc`)
   - IDE/editor configuration files
   - Virtual environments
+- **Commit vs Push Behavior**:
+  - **Default**: All commits are to local repository only (do not push to GitHub)
+  - **GitHub Push**: Only push to GitHub when user explicitly requests it (e.g., "push to GitHub")
+  - When user says "commit" without mentioning GitHub, commit locally only
 - **GitHub Integration**:
   - GitHub Actions automatically runs tests on push/PR (see `.github/workflows/test.yml`)
   - Pre-commit hooks run tests locally before commits (if installed)
