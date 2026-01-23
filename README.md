@@ -1,6 +1,6 @@
 # MeMon Auto-Responder Script
 
-A Python Auto-Responder script for MeshMonitor that monitors home network health (router and DNS resolvers) and outputs JSON alerts only when notifications should fire. Implements failure streak tracking with backoff logic to prevent alert spam.
+A Python Auto-Responder / Time Trigger script for MeshMonitor that monitors home network health (router and DNS resolvers) and outputs JSON alerts only when notifications should fire. Implements failure streak tracking with backoff logic to prevent alert spam.
 
 ## Script Overview
 
