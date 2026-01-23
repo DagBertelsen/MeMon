@@ -584,7 +584,7 @@ python -m unittest discover -s . -p "*.test.py"
 
 This project includes automated testing that runs on every commit:
 
-- **GitHub Actions**: Tests run automatically on push and pull requests across multiple Python versions (3.7-3.12) and operating systems (Ubuntu, Windows, macOS)
+- **GitHub Actions**: Tests run automatically on push and pull requests across multiple Python versions (3.8-3.12) and operating systems (Ubuntu, Windows, macOS)
 - **Pre-commit Hooks**: Local tests run before each commit (optional, install with `pip install pre-commit && pre-commit install`)
 
 ### Test Coverage
