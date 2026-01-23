@@ -604,7 +604,7 @@ The test suite covers:
 
 ### Contributing
 
-Found a bug or have a feature request? Please file an issue on the MeshMonitor GitHub repository.
+Found a bug or have a feature request? Please file an issue on the [MeMon GitHub repository](https://github.com/DagBertelsen/MeMon).
 
 **Before submitting changes:**
 1. Run the test suite: `python memon.test.py -v`

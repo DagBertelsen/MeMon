@@ -7,6 +7,9 @@ __pycache__/
 # State file (auto-generated, runtime-specific)
 memon.state.json
 
+# ignore the user config file
+memon.config.json
+
 # Virtual environments
 venv/
 env/
