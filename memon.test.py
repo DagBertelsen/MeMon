@@ -1279,5 +1279,717 @@ class TestEmitAlert(unittest.TestCase):
 
 
 
+class TestModeDetection(unittest.TestCase):
+    """Test execution mode detection."""
+
+    @patch.dict('os.environ', {'MESSAGE': 'status check'})
+    def test_auto_responder_detected_with_MESSAGE_env(self):
+        """Test Auto Responder detection with MESSAGE env var."""
+        mode = memon.detect_execution_mode()
+        self.assertEqual(mode, "auto_responder")
+
+    @patch.dict('os.environ', {'TRIGGER': 'netcheck'})
+    def test_auto_responder_detected_with_TRIGGER_env(self):
+        """Test Auto Responder detection with TRIGGER env var."""
+        mode = memon.detect_execution_mode()
+        self.assertEqual(mode, "auto_responder")
+
+    @patch.dict('os.environ', {'MESSAGE': 'test', 'TRIGGER': 'test'})
+    def test_auto_responder_detected_with_both_env_vars(self):
+        """Test Auto Responder detection with both env vars present."""
+        mode = memon.detect_execution_mode()
+        self.assertEqual(mode, "auto_responder")
+
+    @patch.dict('os.environ', {}, clear=True)
+    def test_timer_trigger_detected_without_env_vars(self):
+        """Test Timer Trigger detection without env vars."""
+        mode = memon.detect_execution_mode()
+        self.assertEqual(mode, "timer_trigger")
+
+
+class TestStatusReportFormatting(unittest.TestCase):
+    """Test status report formatting for Auto Responder mode."""
+
+    def test_router_down_format(self):
+        """Test Router DOWN message format."""
+        message = memon.format_status_report(False, [], [], [])
+        self.assertEqual(message, "Router DOWN")
+
+    def test_router_ok_no_dns(self):
+        """Test Router OK with no DNS checks configured."""
+        message = memon.format_status_report(True, [], [], [])
+        self.assertEqual(message, "Router OK")
+
+    def test_router_ok_all_dns_fail(self):
+        """Test Router OK but all DNS checks failing."""
+        dns_checks = [
+            {"name": "Google DNS", "server": "8.8.8.8"},
+            {"name": "Cloudflare DNS", "server": "1.1.1.1"}
+        ]
+        failed = ["Google DNS", "Cloudflare DNS"]
+        all_dns = ["Google DNS", "Cloudflare DNS"]
+        message = memon.format_status_report(True, failed, all_dns, dns_checks)
+        self.assertEqual(message, "Router OK, All DNS FAIL")
+
+    def test_router_ok_mixed_dns(self):
+        """Test Router OK with some DNS checks failing."""
+        dns_checks = [
+            {"name": "Google DNS", "server": "8.8.8.8"},
+            {"name": "Cloudflare DNS", "server": "1.1.1.1"}
+        ]
+        failed = ["Cloudflare DNS"]
+        all_dns = ["Google DNS", "Cloudflare DNS"]
+        message = memon.format_status_report(True, failed, all_dns, dns_checks)
+        self.assertEqual(message, "Router OK, DNS: Google DNS OK, Cloudflare DNS FAIL")
+
+    def test_truncation_to_count_format(self):
+        """Test truncation to count format when message exceeds 200 chars."""
+        # Create 20 DNS checks with long names to exceed 200 chars
+        dns_checks = [
+            {"name": f"Very Long DNS Server Name Number {i}", "server": "1.1.1.1"}
+            for i in range(20)
+        ]
+        failed = [f"Very Long DNS Server Name Number {i}" for i in range(10)]
+        all_dns = [f"Very Long DNS Server Name Number {i}" for i in range(20)]
+        message = memon.format_status_report(True, failed, all_dns, dns_checks)
+        # Should use count format
+        self.assertEqual(message, "Router OK, 10 of 20 DNS FAIL")
+        self.assertLessEqual(len(message), 200)
+
+    def test_fallback_dns_names(self):
+        """Test fallback DNS names when names not configured."""
+        # DNS checks without names - should use fallback DNS-0, DNS-1
+        dns_checks = [
+            {"server": "8.8.8.8"},
+            {"server": "1.1.1.1"}
+        ]
+        failed = ["DNS-1"]
+        all_dns = ["DNS-0", "DNS-1"]
+        message = memon.format_status_report(True, failed, all_dns, dns_checks)
+        self.assertEqual(message, "Router OK, DNS: DNS-0 OK, DNS-1 FAIL")
+
+
+class TestAutoResponderMode(unittest.TestCase):
+    """Test Auto Responder mode integration."""
+
+    @patch.dict('os.environ', {'MESSAGE': 'status'})
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.emit_alert')
+    @patch('memon.check_all_dns')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    def test_auto_responder_always_emits(self, mock_load_config, mock_check_router,
+                                         mock_check_dns, mock_emit,
+                                         mock_load_state, mock_save_state):
+        """Auto Responder always emits status, never calls state functions."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "routerCheck": {},
+            "dnsChecks": [{"name": "Google", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"}],
+            "messages": {}
+        }
+        mock_check_router.return_value = True
+        mock_check_dns.return_value = ([], ["Google"])
+
+        memon.main()
+
+        # Should emit alert
+        mock_emit.assert_called_once()
+        call_args = mock_emit.call_args[0][0]
+        self.assertIn("Router OK", call_args)
+
+        # Should NOT call state functions
+        mock_load_state.assert_not_called()
+        mock_save_state.assert_not_called()
+
+    @patch.dict('os.environ', {'MESSAGE': 'status'})
+    @patch('memon.emit_alert')
+    @patch('memon.check_all_dns')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    def test_auto_responder_router_down(self, mock_load_config, mock_check_router,
+                                        mock_check_dns, mock_emit):
+        """Auto Responder reports router down."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "routerCheck": {},
+            "dnsChecks": [],
+            "messages": {}
+        }
+        mock_check_router.return_value = False
+
+        memon.main()
+
+        mock_emit.assert_called_once_with("Router DOWN")
+        # DNS checks should be skipped when router is down
+        mock_check_dns.assert_not_called()
+
+    @patch.dict('os.environ', {'MESSAGE': 'status', 'TRIGGER': 'netcheck'})
+    @patch('memon.emit_alert')
+    @patch('memon.check_all_dns')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    def test_auto_responder_all_dns_fail(self, mock_load_config, mock_check_router,
+                                         mock_check_dns, mock_emit):
+        """Auto Responder reports all DNS failed."""
+        dns_checks = [
+            {"name": "Google DNS", "server": "8.8.8.8"},
+            {"name": "Cloudflare DNS", "server": "1.1.1.1"}
+        ]
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "routerCheck": {},
+            "dnsChecks": dns_checks,
+            "messages": {}
+        }
+        mock_check_router.return_value = True
+        mock_check_dns.return_value = (["Google DNS", "Cloudflare DNS"], ["Google DNS", "Cloudflare DNS"])
+
+        memon.main()
+
+        mock_emit.assert_called_once_with("Router OK, All DNS FAIL")
+
+    @patch.dict('os.environ', {'MESSAGE': 'status', 'TRIGGER': 'test'})
+    @patch('memon.emit_alert')
+    @patch('memon.check_all_dns')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    def test_auto_responder_partial_dns_fail(self, mock_load_config, mock_check_router,
+                                             mock_check_dns, mock_emit):
+        """Auto Responder reports partial DNS failure."""
+        dns_checks = [
+            {"name": "Google DNS", "server": "8.8.8.8"},
+            {"name": "Cloudflare DNS", "server": "1.1.1.1"}
+        ]
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "routerCheck": {},
+            "dnsChecks": dns_checks,
+            "messages": {}
+        }
+        mock_check_router.return_value = True
+        mock_check_dns.return_value = (["Cloudflare DNS"], ["Google DNS", "Cloudflare DNS"])
+
+        memon.main()
+
+        mock_emit.assert_called_once()
+        call_args = mock_emit.call_args[0][0]
+        self.assertIn("Google DNS OK", call_args)
+        self.assertIn("Cloudflare DNS FAIL", call_args)
+
+    @patch.dict('os.environ', {'MESSAGE': 'status'})
+    @patch('memon.emit_alert')
+    @patch('memon.check_all_dns')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    def test_auto_responder_no_dns_checks(self, mock_load_config, mock_check_router,
+                                          mock_check_dns, mock_emit):
+        """Auto Responder with no DNS checks configured."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "routerCheck": {},
+            "dnsChecks": [],
+            "messages": {}
+        }
+        mock_check_router.return_value = True
+        mock_check_dns.return_value = ([], [])
+
+        memon.main()
+
+        mock_emit.assert_called_once_with("Router OK")
+
+    @patch.dict('os.environ', {'MESSAGE': 'status'})
+    @patch('memon.emit_alert')
+    @patch('memon.check_all_dns')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    def test_auto_responder_with_debug_mode(self, mock_load_config, mock_check_router,
+                                            mock_check_dns, mock_emit):
+        """Auto Responder works with debug mode enabled."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "debug": True,
+            "routerCheck": {},
+            "dnsChecks": [],
+            "messages": {}
+        }
+        mock_check_router.return_value = True
+        mock_check_dns.return_value = ([], [])
+
+        memon.main()
+
+        # Should still emit even in debug mode
+        mock_emit.assert_called_once()
+
+    @patch.dict('os.environ', {'MESSAGE': 'status'})
+    @patch('memon.emit_alert')
+    @patch('memon.check_all_dns')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    def test_auto_responder_respects_message_length(self, mock_load_config, mock_check_router,
+                                                     mock_check_dns, mock_emit):
+        """Auto Responder respects 200-char message limit."""
+        # Create many DNS checks
+        dns_checks = [{"name": f"DNS Server {i}", "server": "1.1.1.1"} for i in range(50)]
+        all_dns_names = [f"DNS Server {i}" for i in range(50)]
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "routerCheck": {},
+            "dnsChecks": dns_checks,
+            "messages": {}
+        }
+        mock_check_router.return_value = True
+        mock_check_dns.return_value = ([], all_dns_names)
+
+        memon.main()
+
+        mock_emit.assert_called_once()
+        message = mock_emit.call_args[0][0]
+        self.assertLessEqual(len(message), 200)
+
+
+class TestParseAutoResponderCommand(unittest.TestCase):
+    """Test Auto Responder command parsing."""
+
+    def test_empty_message_returns_help(self):
+        """Empty message returns help."""
+        self.assertEqual(memon.parse_auto_responder_command(""), "help")
+
+    def test_whitespace_only_returns_help(self):
+        """Whitespace-only message returns help."""
+        self.assertEqual(memon.parse_auto_responder_command("   "), "help")
+
+    def test_none_returns_help(self):
+        """None message returns help (defensive)."""
+        self.assertEqual(memon.parse_auto_responder_command(None), "help")
+
+    def test_unrecognized_keyword_returns_help(self):
+        """Unrecognized keyword returns help."""
+        self.assertEqual(memon.parse_auto_responder_command("netcheck"), "help")
+
+    def test_status_keyword(self):
+        """'status' keyword returns status."""
+        self.assertEqual(memon.parse_auto_responder_command("status"), "status")
+
+    def test_all_keyword(self):
+        """'all' keyword returns status."""
+        self.assertEqual(memon.parse_auto_responder_command("all"), "status")
+
+    def test_router_keyword(self):
+        """'router' keyword returns router."""
+        self.assertEqual(memon.parse_auto_responder_command("router"), "router")
+
+    def test_dns_keyword(self):
+        """'dns' keyword returns dns."""
+        self.assertEqual(memon.parse_auto_responder_command("dns"), "dns")
+
+    def test_case_insensitive(self):
+        """Keywords are case-insensitive."""
+        self.assertEqual(memon.parse_auto_responder_command("STATUS"), "status")
+        self.assertEqual(memon.parse_auto_responder_command("Router"), "router")
+        self.assertEqual(memon.parse_auto_responder_command("DNS"), "dns")
+
+    def test_keyword_in_sentence(self):
+        """Keywords found inside a longer message."""
+        self.assertEqual(memon.parse_auto_responder_command("check the router please"), "router")
+        self.assertEqual(memon.parse_auto_responder_command("show me dns results"), "dns")
+
+    def test_status_takes_priority_over_dns(self):
+        """'status' or 'all' takes priority when multiple keywords present."""
+        self.assertEqual(memon.parse_auto_responder_command("check all dns"), "status")
+        self.assertEqual(memon.parse_auto_responder_command("status router dns"), "status")
+
+
+class TestFormatRouterReport(unittest.TestCase):
+    """Test router-only report formatting."""
+
+    def test_router_ok(self):
+        self.assertEqual(memon.format_router_report(True), "Router OK")
+
+    def test_router_down(self):
+        self.assertEqual(memon.format_router_report(False), "Router DOWN")
+
+
+class TestFormatDnsReport(unittest.TestCase):
+    """Test DNS-only report formatting."""
+
+    def test_router_down(self):
+        """Router down means DNS unknown."""
+        result = memon.format_dns_report(False, [], [], [])
+        self.assertEqual(result, "DNS: Unknown (router down)")
+
+    def test_no_checks_configured(self):
+        """No DNS checks configured."""
+        result = memon.format_dns_report(True, [], [], [])
+        self.assertEqual(result, "DNS: No checks configured")
+
+    def test_all_ok(self):
+        """All DNS checks pass."""
+        dns_checks = [{"name": "Google", "server": "8.8.8.8"}]
+        result = memon.format_dns_report(True, [], ["Google"], dns_checks)
+        self.assertEqual(result, "DNS: All OK")
+
+    def test_all_fail(self):
+        """All DNS checks fail."""
+        dns_checks = [{"name": "Google", "server": "8.8.8.8"}]
+        result = memon.format_dns_report(True, ["Google"], ["Google"], dns_checks)
+        self.assertEqual(result, "DNS: All FAIL")
+
+    def test_mixed_status(self):
+        """Mixed DNS results show individual statuses."""
+        dns_checks = [
+            {"name": "Google", "server": "8.8.8.8"},
+            {"name": "Cloudflare", "server": "1.1.1.1"}
+        ]
+        result = memon.format_dns_report(True, ["Cloudflare"], ["Google", "Cloudflare"], dns_checks)
+        self.assertIn("Google OK", result)
+        self.assertIn("Cloudflare FAIL", result)
+
+    def test_respects_message_length(self):
+        """DNS report respects 200-char limit."""
+        dns_checks = [{"name": f"DNS-Server-{i}", "server": f"10.0.0.{i}"} for i in range(30)]
+        all_dns = [f"DNS-Server-{i}" for i in range(30)]
+        failed = all_dns[:15]
+        result = memon.format_dns_report(True, failed, all_dns, dns_checks)
+        self.assertLessEqual(len(result), 200)
+
+
+class TestFormatHelpMessage(unittest.TestCase):
+    """Test help message formatting."""
+
+    def test_contains_commands(self):
+        """Help message lists all commands."""
+        msg = memon.format_help_message()
+        self.assertIn("status", msg)
+        self.assertIn("router", msg)
+        self.assertIn("dns", msg)
+
+    def test_fits_message_length(self):
+        """Help message fits within 200-char limit."""
+        self.assertLessEqual(len(memon.format_help_message()), 200)
+
+
+class TestAutoResponderCommandDispatch(unittest.TestCase):
+    """Test Auto Responder command dispatch in main()."""
+
+    @patch.dict('os.environ', {'MESSAGE': 'netcheck', 'TRIGGER': 'netcheck'})
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    @patch('memon.emit_alert')
+    def test_no_args_shows_help(self, mock_emit, mock_load_config, mock_check_router):
+        """No recognized command shows help guide."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "routerCheck": {},
+            "dnsChecks": [],
+            "messages": {}
+        }
+
+        memon.main()
+
+        mock_emit.assert_called_once()
+        message = mock_emit.call_args[0][0]
+        self.assertIn("status", message)
+        self.assertIn("router", message)
+        self.assertIn("dns", message)
+        # Should not have run network checks
+        mock_check_router.assert_not_called()
+
+    @patch.dict('os.environ', {'MESSAGE': 'router', 'TRIGGER': 'netcheck'})
+    @patch('memon.check_all_dns')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    @patch('memon.emit_alert')
+    def test_router_command(self, mock_emit, mock_load_config, mock_check_router, mock_check_dns):
+        """Router command returns router-only report."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "routerCheck": {},
+            "dnsChecks": [{"name": "DNS1", "server": "8.8.8.8"}],
+            "messages": {}
+        }
+        mock_check_router.return_value = True
+
+        memon.main()
+
+        mock_emit.assert_called_once_with("Router OK")
+        mock_check_dns.assert_not_called()
+
+    @patch.dict('os.environ', {'MESSAGE': 'dns', 'TRIGGER': 'netcheck'})
+    @patch('memon.check_all_dns')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    @patch('memon.emit_alert')
+    def test_dns_command(self, mock_emit, mock_load_config, mock_check_router, mock_check_dns):
+        """DNS command returns DNS-only report."""
+        dns_checks = [
+            {"name": "Google", "server": "8.8.8.8"},
+            {"name": "Cloudflare", "server": "1.1.1.1"}
+        ]
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "routerCheck": {},
+            "dnsChecks": dns_checks,
+            "messages": {}
+        }
+        mock_check_router.return_value = True
+        mock_check_dns.return_value = (["Cloudflare"], ["Google", "Cloudflare"])
+
+        memon.main()
+
+        mock_emit.assert_called_once()
+        message = mock_emit.call_args[0][0]
+        self.assertIn("DNS:", message)
+        self.assertIn("Google OK", message)
+        self.assertIn("Cloudflare FAIL", message)
+
+    @patch.dict('os.environ', {'MESSAGE': 'dns', 'TRIGGER': 'netcheck'})
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    @patch('memon.emit_alert')
+    def test_dns_command_router_down(self, mock_emit, mock_load_config, mock_check_router):
+        """DNS command when router is down."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "routerCheck": {},
+            "dnsChecks": [{"name": "DNS1", "server": "8.8.8.8"}],
+            "messages": {}
+        }
+        mock_check_router.return_value = False
+
+        memon.main()
+
+        mock_emit.assert_called_once_with("DNS: Unknown (router down)")
+
+    @patch.dict('os.environ', {'MESSAGE': 'show status', 'TRIGGER': 'netcheck'})
+    @patch('memon.check_all_dns')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    @patch('memon.emit_alert')
+    def test_status_command(self, mock_emit, mock_load_config, mock_check_router, mock_check_dns):
+        """Status command returns full report."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "routerCheck": {},
+            "dnsChecks": [{"name": "Google", "server": "8.8.8.8"}],
+            "messages": {}
+        }
+        mock_check_router.return_value = True
+        mock_check_dns.return_value = ([], ["Google"])
+
+        memon.main()
+
+        mock_emit.assert_called_once_with("Router OK, DNS: Google OK")
+
+
+class TestTimerTriggerModeUnchanged(unittest.TestCase):
+    """Verify Timer Trigger mode behavior remains unchanged."""
+
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.emit_alert')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    def test_timer_trigger_respects_must_fail_count(self, mock_load_config,
+                                                     mock_check_router, mock_emit,
+                                                     mock_load_state, mock_save_state):
+        """Timer Trigger only alerts after mustFailCount failures."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 0,
+            "routerCheck": {},
+            "dnsChecks": [],
+            "messages": {"routerDown": "Router down"}
+        }
+        mock_load_state.return_value = {
+            "failStreak": 1,  # After this run becomes 2, still below 3
+            "downNotified": False,
+            "lastAlertTs": 0,
+            "lastStatus": None,
+            "lastFailedDns": []
+        }
+        mock_check_router.return_value = False
+
+        memon.main()
+
+        # Should not emit (only 2 failures total, need 3)
+        mock_emit.assert_not_called()
+        # Should save updated state
+        mock_save_state.assert_called_once()
+
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('time.time', return_value=1000)
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.emit_alert')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    def test_timer_trigger_respects_backoff(self, mock_load_config, mock_check_router,
+                                            mock_emit, mock_load_state, mock_save_state,
+                                            mock_time):
+        """Timer Trigger respects backoff period."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 1,
+            "alertBackoffSeconds": 900,
+            "routerCheck": {},
+            "dnsChecks": [],
+            "messages": {"routerDown": "Router down"}
+        }
+        mock_load_state.return_value = {
+            "failStreak": 0,
+            "downNotified": False,
+            "lastAlertTs": 500,  # 500 seconds ago (backoff is 900)
+            "lastStatus": None,
+            "lastFailedDns": []
+        }
+        mock_check_router.return_value = False
+
+        memon.main()
+
+        # Should not emit (backoff period not elapsed)
+        mock_emit.assert_not_called()
+        mock_save_state.assert_called_once()
+
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.emit_alert')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    def test_timer_trigger_loads_and_saves_state(self, mock_load_config, mock_check_router,
+                                                  mock_emit, mock_load_state, mock_save_state):
+        """Timer Trigger loads and saves state file."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 0,
+            "routerCheck": {},
+            "dnsChecks": [],
+            "messages": {}
+        }
+        mock_load_state.return_value = {
+            "failStreak": 0,
+            "downNotified": False,
+            "lastAlertTs": 0,
+            "lastStatus": None,
+            "lastFailedDns": []
+        }
+        mock_check_router.return_value = True
+
+        memon.main()
+
+        # Should load and save state
+        mock_load_state.assert_called_once()
+        mock_save_state.assert_called_once()
+
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('time.time', return_value=2000)
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.emit_alert')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    def test_timer_trigger_recovery_alert(self, mock_load_config, mock_check_router,
+                                          mock_emit, mock_load_state, mock_save_state,
+                                          mock_time):
+        """Timer Trigger fires recovery alert when network recovers."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 900,
+            "routerCheck": {},
+            "dnsChecks": [],
+            "messages": {"recovery": "Network restored"}
+        }
+        mock_load_state.return_value = {
+            "failStreak": 3,
+            "downNotified": True,
+            "lastAlertTs": 1000,
+            "lastStatus": "routerDown",
+            "lastFailedDns": []
+        }
+        mock_check_router.return_value = True
+
+        memon.main()
+
+        # Should emit recovery alert
+        mock_emit.assert_called_once_with("Network restored")
+        mock_save_state.assert_called_once()
+
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('time.time', return_value=2000)
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.emit_alert')
+    @patch('memon.check_all_dns')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    def test_timer_trigger_partial_recovery_alert(self, mock_load_config, mock_check_router,
+                                                   mock_check_dns, mock_emit, mock_load_state,
+                                                   mock_save_state, mock_time):
+        """Timer Trigger fires partial recovery alert."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 900,
+            "routerCheck": {},
+            "dnsChecks": [{"name": "DNS1", "server": "8.8.8.8"}],
+            "messages": {"ispDown": "All DNS failed"}
+        }
+        mock_load_state.return_value = {
+            "failStreak": 3,
+            "downNotified": True,
+            "lastAlertTs": 1000,
+            "lastStatus": "routerDown",
+            "lastFailedDns": []
+        }
+        mock_check_router.return_value = True
+        mock_check_dns.return_value = (["DNS1"], ["DNS1"])
+
+        memon.main()
+
+        # Should emit partial recovery alert (router recovered but DNS failed)
+        mock_emit.assert_called_once()
+        mock_save_state.assert_called_once()
+
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.emit_alert')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    def test_timer_trigger_ignores_args(self, mock_load_config, mock_check_router,
+                                        mock_emit, mock_load_state, mock_save_state):
+        """Timer Trigger mode ignores command args (no command parsing)."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 0,
+            "routerCheck": {},
+            "dnsChecks": [],
+            "messages": {}
+        }
+        mock_load_state.return_value = {
+            "failStreak": 0,
+            "downNotified": False,
+            "lastAlertTs": 0,
+            "lastStatus": None,
+            "lastFailedDns": []
+        }
+        mock_check_router.return_value = True
+
+        memon.main()
+
+        # Should behave normally: load state, check router, save state
+        mock_load_state.assert_called_once()
+        mock_save_state.assert_called_once()
+        # Should NOT emit help guide
+        mock_emit.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

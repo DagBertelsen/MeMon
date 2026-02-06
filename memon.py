@@ -112,10 +112,10 @@ def _ms_to_seconds(ms: int) -> float:
 def _get_default_port(method: str) -> int:
     """
     Get default port number for router check method.
-    
+
     Args:
         method: Router check method ("https", "http", or "tcp")
-        
+
     Returns:
         Default port number for the method
     """
@@ -126,6 +126,66 @@ def _get_default_port(method: str) -> int:
         return DEFAULT_HTTP_PORT
     else:
         return DEFAULT_HTTPS_PORT  # Default to HTTPS port
+
+
+def detect_execution_mode() -> str:
+    """
+    Detect execution mode based on environment variables.
+
+    MeshMonitor sets MESSAGE and/or TRIGGER environment variables when
+    running in Auto Responder mode (user-triggered). Timer Trigger mode
+    (scheduled) does not set these variables.
+
+    Returns:
+        "auto_responder" if MESSAGE or TRIGGER env vars are present
+        "timer_trigger" if neither env var is present
+    """
+    if os.environ.get("MESSAGE") or os.environ.get("TRIGGER"):
+        return "auto_responder"
+    return "timer_trigger"
+
+
+def parse_auto_responder_command(message: str) -> str:
+    """
+    Parse a command keyword from the Auto Responder MESSAGE text.
+
+    Scans the lowercased message for recognized command keywords.
+    Returns the first match found. If no keyword is recognized or
+    the message is empty, returns "help".
+
+    Args:
+        message: The raw MESSAGE environment variable value
+
+    Returns:
+        Command string: "status", "router", "dns", or "help"
+    """
+    if not message or not message.strip():
+        return "help"
+
+    text = message.lower()
+
+    if "status" in text or "all" in text:
+        return "status"
+    if "router" in text:
+        return "router"
+    if "dns" in text:
+        return "dns"
+
+    return "help"
+
+
+def _get_dns_display_name(check: Dict[str, Any], index: int) -> str:
+    """
+    Extract display name from DNS check config or generate fallback.
+
+    Args:
+        check: DNS check configuration dictionary
+        index: Zero-based index for fallback naming
+
+    Returns:
+        Display name for the DNS server
+    """
+    return check.get("name", f"DNS-{index}")
 
 
 def _log_router_failure(method: str, host: str, port: int, reason: str, debug: bool) -> None:
@@ -804,12 +864,12 @@ def replace_placeholders(template: str, failed_names: List[str]) -> str:
 def _format_alert_message(status: Optional[str], messages: Dict[str, str], failed_dns: List[str]) -> str:
     """
     Format alert message based on status and failed DNS resolvers.
-    
+
     Args:
         status: Current status classification
         messages: Message templates dictionary
         failed_dns: List of failed DNS resolver names
-        
+
     Returns:
         Formatted alert message
     """
@@ -822,6 +882,141 @@ def _format_alert_message(status: Optional[str], messages: Dict[str, str], faile
         return replace_placeholders(template, failed_dns)
     else:
         return "Network issue detected"
+
+
+def format_status_report(router_ok: bool, failed_dns: List[str], all_dns: List[str],
+                        dns_checks: List[Dict[str, Any]]) -> str:
+    """
+    Format status report for Auto Responder mode.
+
+    Returns current status of router and all DNS checks, optimized for
+    200-character MeshMonitor message limit.
+
+    Args:
+        router_ok: Whether router check passed
+        failed_dns: List of failed DNS resolver names
+        all_dns: List of all DNS resolver names
+        dns_checks: DNS check configurations (for name extraction)
+
+    Returns:
+        Formatted status message (max 200 chars with truncation)
+
+    Output formats:
+        - Router down: "Router DOWN"
+        - Router OK, no DNS: "Router OK"
+        - Router OK, all DNS fail: "Router OK, All DNS FAIL"
+        - Router OK, mixed: "Router OK, DNS: Google OK, Cloudflare FAIL, ..."
+    """
+    # Router down - simple message
+    if not router_ok:
+        return "Router DOWN"
+
+    # Router OK, no DNS checks configured
+    if not all_dns:
+        return "Router OK"
+
+    # Router OK, all DNS failed
+    if len(failed_dns) == len(all_dns):
+        return "Router OK, All DNS FAIL"
+
+    # Router OK, mixed DNS status - build detailed report
+    # Format: "Router OK, DNS: Name1 OK, Name2 FAIL, Name3 OK"
+    dns_statuses = []
+    for i, check in enumerate(dns_checks):
+        name = _get_dns_display_name(check, i)
+        status = "FAIL" if name in failed_dns else "OK"
+        dns_statuses.append(f"{name} {status}")
+
+    # Join with comma-space separator
+    dns_report = ", ".join(dns_statuses)
+    message = f"Router OK, DNS: {dns_report}"
+
+    # Truncate if exceeds MAX_MESSAGE_LENGTH (200 chars)
+    if len(message) > MAX_MESSAGE_LENGTH:
+        # Try abbreviated format: "Router OK, 2 of 5 DNS FAIL"
+        fail_count = len(failed_dns)
+        total_count = len(all_dns)
+        message = f"Router OK, {fail_count} of {total_count} DNS FAIL"
+
+        # If still too long, use minimal format
+        if len(message) > MAX_MESSAGE_LENGTH:
+            message = message[:MAX_MESSAGE_LENGTH - 3] + "..."
+
+    return message
+
+
+def format_router_report(router_ok: bool) -> str:
+    """
+    Format router-only status report for Auto Responder mode.
+
+    Args:
+        router_ok: Whether router check passed
+
+    Returns:
+        Formatted router status message
+    """
+    if router_ok:
+        return "Router OK"
+    return "Router DOWN"
+
+
+def format_dns_report(router_ok: bool, failed_dns: List[str], all_dns: List[str],
+                      dns_checks: List[Dict[str, Any]]) -> str:
+    """
+    Format DNS-only status report for Auto Responder mode.
+
+    Router must be up to perform DNS checks. If router is down,
+    reports that DNS could not be checked.
+
+    Args:
+        router_ok: Whether router check passed
+        failed_dns: List of failed DNS resolver names
+        all_dns: List of all DNS resolver names
+        dns_checks: DNS check configurations (for name extraction)
+
+    Returns:
+        Formatted DNS status message (max 200 chars with truncation)
+    """
+    if not router_ok:
+        return "DNS: Unknown (router down)"
+
+    if not all_dns:
+        return "DNS: No checks configured"
+
+    if len(failed_dns) == len(all_dns):
+        return "DNS: All FAIL"
+
+    if not failed_dns:
+        return "DNS: All OK"
+
+    # Mixed status - show individual results
+    dns_statuses = []
+    for i, check in enumerate(dns_checks):
+        name = _get_dns_display_name(check, i)
+        status = "FAIL" if name in failed_dns else "OK"
+        dns_statuses.append(f"{name} {status}")
+
+    dns_report = ", ".join(dns_statuses)
+    message = f"DNS: {dns_report}"
+
+    if len(message) > MAX_MESSAGE_LENGTH:
+        fail_count = len(failed_dns)
+        total_count = len(all_dns)
+        message = f"DNS: {fail_count} of {total_count} FAIL"
+        if len(message) > MAX_MESSAGE_LENGTH:
+            message = message[:MAX_MESSAGE_LENGTH - 3] + "..."
+
+    return message
+
+
+def format_help_message() -> str:
+    """
+    Format help guide listing supported Auto Responder commands.
+
+    Returns:
+        Help message string (fits within 200-char limit)
+    """
+    return "Commands: status (full report), router (router only), dns (DNS only)"
 
 
 def _update_state(state: Dict[str, Any], fail_streak: int, down_notified: bool,
@@ -847,11 +1042,14 @@ def _update_state(state: Dict[str, Any], fail_streak: int, down_notified: bool,
 def main() -> None:
     """
     Main function: orchestrate checks and alert logic with timeout protection.
+    Supports two execution modes:
+    - Auto Responder: Stateless, always returns current status
+    - Timer Trigger: Stateful, conditional alerts with backoff
     """
     start_time = time.time()
     # Cache current time to avoid multiple system calls and ensure consistency
     current_time = int(time.time())
-    
+
     # Load configuration
     config = load_config()
     timeout_ms = config.get("timeoutMs", 2500)
@@ -861,7 +1059,54 @@ def main() -> None:
     messages = config.get("messages", {})
     router_check = config.get("routerCheck", {})
     dns_checks = config.get("dnsChecks", [])
-    
+
+    # Detect execution mode
+    mode = detect_execution_mode()
+
+    # Parse command for Auto Responder mode (before network checks to optimize)
+    ar_command = None  # type: Optional[str]
+    if mode == "auto_responder":
+        ar_message = os.environ.get("MESSAGE", "")
+        ar_command = parse_auto_responder_command(ar_message)
+
+        # Help command needs no network checks
+        if ar_command == "help":
+            emit_alert(format_help_message())
+            return
+
+    # Calculate remaining time (ensure we finish before MeshMonitor timeout)
+    elapsed = time.time() - start_time
+    remaining_time = MESHMONITOR_TIMEOUT - elapsed - TIMEOUT_SAFETY_MARGIN
+    if remaining_time <= 0:
+        # Already out of time, exit silently
+        return
+
+    # Check router first
+    router_ok = check_router(router_check, timeout_ms, debug)
+
+    # Check DNS if router is up (skip for router-only command)
+    failed_dns = []
+    all_dns = []
+    if router_ok and ar_command != "router":
+        # Check DNS with remaining time
+        elapsed = time.time() - start_time
+        remaining_time = MESHMONITOR_TIMEOUT - elapsed - TIMEOUT_SAFETY_MARGIN
+        if remaining_time > 0:
+            failed_dns, all_dns = check_all_dns(dns_checks, timeout_ms, remaining_time, debug)
+
+    # Branch based on execution mode
+    if mode == "auto_responder":
+        # Auto Responder: Emit report based on command (stateless)
+        if ar_command == "router":
+            message = format_router_report(router_ok)
+        elif ar_command == "dns":
+            message = format_dns_report(router_ok, failed_dns, all_dns, dns_checks)
+        else:  # "status" / "all"
+            message = format_status_report(router_ok, failed_dns, all_dns, dns_checks)
+        emit_alert(message)
+        return
+
+    # Timer Trigger: Existing logic (unchanged)
     # Load state
     state = load_state()
     fail_streak = state.get("failStreak", 0)
@@ -869,63 +1114,43 @@ def main() -> None:
     last_alert_ts = state.get("lastAlertTs", 0)
     last_status = state.get("lastStatus", None)
     last_failed_dns = state.get("lastFailedDns", [])
-    
-    # Calculate remaining time (ensure we finish before MeshMonitor timeout)
-    elapsed = time.time() - start_time
-    remaining_time = MESHMONITOR_TIMEOUT - elapsed - TIMEOUT_SAFETY_MARGIN
-    if remaining_time <= 0:
-        # Already out of time, exit silently
-        return
-    
-    # Check router first
-    router_ok = check_router(router_check, timeout_ms, debug)
-    
-    # If router is down, skip DNS checks
-    failed_dns = []
-    all_dns = []
-    if router_ok:
-        # Check DNS with remaining time
-        elapsed = time.time() - start_time
-        remaining_time = MESHMONITOR_TIMEOUT - elapsed - TIMEOUT_SAFETY_MARGIN
-        if remaining_time > 0:
-            failed_dns, all_dns = check_all_dns(dns_checks, timeout_ms, remaining_time, debug)
-    
+
     # Classify status
     status = classify_status(router_ok, failed_dns, all_dns)
     all_ok = (status is None)
-    
+
     # Update failure streak
     if all_ok:
         fail_streak = 0
     else:
         fail_streak += 1
-    
+
     # Determine if alerts should fire
     fire_down = should_fire_down_alert(fail_streak, must_fail_count, down_notified,
                                        last_alert_ts, backoff_seconds, current_time)
     fire_up = should_fire_up_alert(all_ok, down_notified)
     fire_partial_recovery = should_fire_partial_recovery_alert(last_status, status, down_notified,
                                                                 last_failed_dns, failed_dns)
-    
+
     # Emit alerts and update state
     if fire_down:
         message = _format_alert_message(status, messages, failed_dns)
         emit_alert(message)
         down_notified = True
         last_alert_ts = current_time
-    
+
     elif fire_up:
         message = messages.get("recovery", "Network connectivity restored")
         emit_alert(message)
         down_notified = False
         last_alert_ts = current_time
-    
+
     elif fire_partial_recovery:
         # Partial recovery: routerDown → ispDown/upstreamDnsDown, or ispDown → upstreamDnsDown
         message = _format_alert_message(status, messages, failed_dns)
         emit_alert(message)
         last_alert_ts = current_time
-    
+
     # Save updated state
     _update_state(state, fail_streak, down_notified, last_alert_ts, status, failed_dns)
     save_state(state)
