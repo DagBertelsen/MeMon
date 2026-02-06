@@ -23,6 +23,61 @@ The script uses failure streak tracking to distinguish between transient network
 - Track upstream DNS resolver failures
 - Get notified when network issues occur or resolve
 
+## Execution Modes
+
+The script automatically detects and operates in one of two modes based on how it's triggered in MeshMonitor:
+
+### Auto Responder Mode (Manual Status Checks)
+
+**Triggered when**: User sends a message matching an Auto Responder trigger pattern
+**Detection**: `MESSAGE` or `TRIGGER` environment variables are present
+**Behavior**:
+- **Stateless operation**: No state file loading or saving
+- **Always responds**: Returns current network status immediately
+- **Bypasses failure tracking**: No `mustFailCount` or `alertBackoffSeconds` logic
+- **Instant feedback**: Perfect for on-demand status checks
+
+**Example Output Formats**:
+- `Router DOWN` - Router is unreachable
+- `Router OK` - Router up, no DNS checks configured
+- `Router OK, All DNS FAIL` - Router up but all DNS servers failing
+- `Router OK, DNS: Google OK, Cloudflare FAIL, Altibox OK` - Mixed status
+
+**Supported Commands**: Include a keyword after the trigger word to request a specific report:
+- `{trigger} status` - Full report (router + all DNS)
+- `{trigger} router` - Router-only check
+- `{trigger} dns` - DNS-only report
+- `{trigger}` (no keyword) - Help guide listing available commands
+
+**Use Case**: Send "netcheck status" to get full network status, or just "netcheck" for a list of commands.
+
+### Timer Trigger Mode (Scheduled Monitoring)
+
+**Triggered when**: Scheduled via cron/timer in MeshMonitor
+**Detection**: `MESSAGE` and `TRIGGER` environment variables are not set
+**Behavior**:
+- **Stateful operation**: Loads and saves state file between runs
+- **Conditional alerts**: Only emits when failure thresholds met
+- **Failure tracking**: Respects `mustFailCount` streak requirements
+- **Backoff logic**: Honors `alertBackoffSeconds` to prevent alert spam
+- **Recovery tracking**: Detects and reports network recovery
+
+**Use Case**: Automated monitoring every N minutes/hours with intelligent alerting.
+
+### Mode Detection
+
+The script automatically detects which mode to use:
+
+```python
+# MeshMonitor sets these when running Auto Responder:
+MESSAGE="status check"   # The message text received
+TRIGGER="netcheck"       # The trigger pattern that matched
+
+# Timer Triggers do NOT set these variables
+```
+
+**No configuration needed** - the mode is automatically determined at runtime based on environment variables set by MeshMonitor.
+
 ## Prerequisites
 
 - **Python**: Version 3.5 or higher (uses only standard library - no external dependencies)
@@ -341,17 +396,22 @@ Use this method when you want to manually trigger network checks by sending mess
 1. Navigate to **Settings → Automation → Auto Responder** in MeshMonitor
 2. Click **"Add Trigger"**
 3. Configure the trigger:
-   - **Trigger Pattern**: Use a pattern that matches when you want to check network status. Examples:
-     - `netcheck` - Simple command trigger
-     - `check network` - Phrase trigger
-     - `status` - Short status check
-   - **Response Type**: Select **"Script"**
-   - **Script Path**: Enter `/data/scripts/memon.py`
+   - **Trigger**: Enter comma-separated patterns: `memon, memon {argument}`
+   - **Type**: Select **"Script Ex"**
+   - **Response**: Select your `memon.py` script
+   - **Channel**: Select the channel to listen on (e.g., "Direct Messages")
+4. **Important**: MeshMonitor uses exact matching for triggers. You need **two comma-separated patterns** to support both the bare trigger word and subcommands:
+   - `memon` - Matches the trigger word alone (returns help)
+   - `memon {argument}` - Matches the trigger word followed by any argument (e.g., `memon status`, `memon router`, `memon dns`)
 
-#### 2. Example Trigger Patterns
+#### 2. Example Trigger Configuration
 
-- **Simple Command**: `netcheck` - Send "netcheck" to trigger
-- **Question Format**: `network status` - Natural language trigger
+Trigger field value: `memon, memon {argument}`
+
+| Pattern | Matches | Response |
+|---|---|---|
+| `memon` | `memon` (exact) | Help: lists available commands |
+| `memon {argument}` | `memon status`, `memon router`, `memon dns` | Requested report |
 
 #### 3. Configuration for Auto Responder
 
@@ -363,10 +423,9 @@ See the "Use Cases and Configuration" section above for details.
 
 #### 4. Testing the Trigger
 
-1. Send a message matching your trigger pattern to your MeshMonitor node
-2. The script will run and check network status
-3. If conditions are met (failures exceed threshold), you'll receive an alert
-4. Otherwise, the script exits silently (no response)
+1. Send a message matching your trigger pattern to your MeshMonitor node (e.g., `memon` or `memon status`)
+2. The script will run and return current network status
+3. You'll always receive a response: a status report or a help message listing available commands
 
 ### Option 2: Timer Triggers (Automated Scheduling)
 
@@ -425,13 +484,22 @@ The script path in MeshMonitor should be:
 ### Execution Flow
 
 1. **Load Configuration**: Reads `memon.config.json` (or uses defaults)
-2. **Load State**: Reads `memon.state.json` (creates default if missing)
-3. **Check Router**: Performs router check (HTTPS or TCP socket connection)
+2. **Detect Execution Mode**: Checks for `MESSAGE`/`TRIGGER` environment variables
+   - If present → **Auto Responder Mode** (stateless)
+   - If absent → **Timer Trigger Mode** (stateful)
+3. **Check Router**: Performs router check (HTTPS, HTTP, or TCP socket connection)
    - If router fails → Classify as "router down", skip DNS checks
 4. **Check DNS** (if router OK): Checks all configured DNS resolvers in parallel using standard library socket
-5. **Classify Status**: Determines failure type (router down, all DNS failed, some DNS failed, or all OK)
-6. **Update Failure Streak**: Increments on failure, resets on success
-7. **Evaluate Alerts**:
+
+**Auto Responder Mode** (steps 5-6):
+5. **Format Status Report**: Creates message with current router and DNS status
+6. **Output**: Always emits JSON status report to stdout, then exits (no state operations)
+
+**Timer Trigger Mode** (steps 5-9):
+5. **Load State**: Reads `memon.state.json` (creates default if missing)
+6. **Classify Status**: Determines failure type (router down, all DNS failed, some DNS failed, or all OK)
+7. **Update Failure Streak**: Increments on failure, resets on success
+8. **Evaluate Alerts**:
    - **DOWN alert fires when**: `failStreak >= mustFailCount` AND `downNotified == false` AND backoff elapsed
      - Once `downNotified` is set to `true`, no further DOWN alerts will fire until full recovery, regardless of backoff period
      - The backoff period (`alertBackoffSeconds`) only matters for the first alert; it prevents rapid-fire alerts when services are flapping
@@ -441,7 +509,7 @@ The script path in MeshMonitor should be:
      - Router recovers but DNS issues remain (routerDown → ispDown/upstreamDnsDown)
      - All DNS failed → some DNS recovered (ispDown → upstreamDnsDown)
      - Some DNS recovered (upstreamDnsDown → upstreamDnsDown with fewer failures)
-8. **Output**: Emits JSON to stdout only when alert fires, otherwise exits silently. When `debug=true`, failure messages are also printed to stdout for troubleshooting.
+9. **Output & Save State**: Emits JSON to stdout only when alert fires (otherwise exits silently), saves updated state. When `debug=true`, failure messages are also printed to stdout for troubleshooting.
 
 ### State Management
 
