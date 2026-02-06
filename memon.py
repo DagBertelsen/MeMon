@@ -5,7 +5,7 @@
 #   language: Python
 
 """
-MeMon Auto-Responder Script for MeshMonitor
+MeMon Network Health Monitor for MeshMonitor
 
 Monitors router and DNS health, outputs JSON alerts only when notifications should fire.
 Implements failure streak tracking with backoff logic.

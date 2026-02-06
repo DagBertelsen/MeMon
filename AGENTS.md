@@ -1,8 +1,11 @@
-# MeMon - Network Monitor Auto-Responder
+# MeMon - Network Health Monitor
 
 ## Project Overview
 
-This project implements **MeMon**, a Python Auto-Responder / Time Trigger script for MeshMonitor that monitors router and DNS health, outputs JSON alerts only when notifications should fire, with configurable checks, failure streak tracking, and alert backoff logic.
+This project implements **MeMon**, a Python Auto-Responder / Time Trigger script for MeshMonitor that monitors router and DNS health. The script automatically detects its execution mode and operates in one of two ways:
+
+- **Auto Responder Mode**: Stateless, always returns immediate network status (for manual checks)
+- **Timer Trigger Mode**: Stateful, conditional alerts with failure streak tracking and backoff logic (for scheduled monitoring)
 
 **Project Status**: Production-ready, actively maintained
 
@@ -48,6 +51,9 @@ pre-commit install
   #   emoji: 🌐
   #   language: Python
   ```
+- **Execution Mode Detection**: Automatically adapts based on MeshMonitor environment variables
+  - Auto Responder: `MESSAGE` and/or `TRIGGER` env vars present
+  - Timer Trigger: No special env vars set
 
 ### Code Standards
 
@@ -72,35 +78,66 @@ pre-commit install
 ### File Structure
 
 - [memon.py](memon.py) - Main script
+- [memon.test.py](memon.test.py) - Test suite using `unittest`
 - [memon.config.example.json](memon.config.example.json) - Example configuration (copy to `memon.config.json` for use)
 - `memon.config.json` - Active configuration file (not in repo, created by user)
 - `memon.state.json` - State file (auto-created, not in repo)
-- [memon.test.py](memon.test.py) - Test suite using `unittest`
 - [README.md](README.md) - Comprehensive documentation
+- [AGENTS.md](AGENTS.md) - AI instructions (single source of truth)
+- [CLAUDE.md](CLAUDE.md) - Claude Code entry point (references AGENTS.md)
+- [.gitignore](.gitignore) - Git ignore rules
+- [.aiignore](.aiignore) - AI tool ignore rules (excludes runtime/sensitive files)
 
 ### Key Functions
 
 Core functions implemented in [memon.py](memon.py):
 
+**Configuration & State:**
 - `load_config()` - Load and validate config with defaults
-- `load_state()` - Load state file or create default
-- `save_state()` - Write state to JSON file
+- `load_state()` - Load state file or create default (Timer Trigger only)
+- `save_state()` - Write state to JSON file (Timer Trigger only)
+
+**Mode Detection:**
+- `detect_execution_mode()` - Detect Auto Responder vs Timer Trigger mode via environment variables
+
+**Network Checks:**
 - `check_router()` - Perform router check (HTTPS, HTTP, or TCP socket connection)
 - `check_router_https()` - Check router via HTTPS request
 - `check_router_http()` - Check router via HTTP request
 - `check_router_tcp()` - Check router via TCP socket connection
 - `check_dns()` - Check single DNS resolver using standard library socket
 - `check_all_dns()` - Check all DNS resolvers in parallel (with timeout)
-- `classify_status()` - Determine status classification
-- `should_fire_down_alert()` - Check if DOWN alert should fire
-- `should_fire_up_alert()` - Check if UP alert should fire
-- `should_fire_partial_recovery_alert()` - Check if partial recovery alert should fire
+
+**Status & Alerting:**
+- `classify_status()` - Determine status classification (Timer Trigger only)
+- `format_status_report()` - Format immediate status report (Auto Responder only)
+- `should_fire_down_alert()` - Check if DOWN alert should fire (Timer Trigger only)
+- `should_fire_up_alert()` - Check if UP alert should fire (Timer Trigger only)
+- `should_fire_partial_recovery_alert()` - Check if partial recovery alert should fire (Timer Trigger only)
+
+**Output:**
 - `replace_placeholders()` - Replace placeholders in message templates
 - `emit_alert()` - Output JSON to stdout
-- `main()` - Orchestrate checks and alert logic with timeout protection
+- `main()` - Orchestrate checks and alert logic with mode branching
 
 ### Alert Logic
 
+**Auto Responder Mode** (Stateless):
+- **Always emits**: Current network status regardless of failures or streaks
+- **No state operations**: Bypasses `load_state()` and `save_state()`
+- **No failure tracking**: Ignores `mustFailCount` and `alertBackoffSeconds`
+- **Command parsing**: Parses `MESSAGE` env var for command keyword after the trigger word:
+  - `status` or `all` - Full report: router + all DNS (default behavior)
+  - `router` - Router-only check
+  - `dns` - DNS-only report
+  - No keyword match - Help guide listing available commands
+- **Output formats** (for status/all command):
+  - `"Router DOWN"` - Router unreachable
+  - `"Router OK"` - Router up, no DNS checks
+  - `"Router OK, All DNS FAIL"` - All DNS failing
+  - `"Router OK, DNS: Name1 OK, Name2 FAIL"` - Mixed status (truncates to 200 chars)
+
+**Timer Trigger Mode** (Stateful):
 - **DOWN alert fires when**: `failStreak >= mustFailCount` AND `downNotified == false` AND backoff elapsed
 - **UP alert fires when**: All checks pass AND `downNotified == true`
 - **Partial Recovery alert fires when**: Network partially recovers (bypasses backoff):
@@ -209,8 +246,8 @@ See [memon.config.example.json](memon.config.example.json) for a complete exampl
   - Source code changes ([memon.py](memon.py), [memon.test.py](memon.test.py))
   - Configuration templates ([memon.config.example.json](memon.config.example.json))
   - Documentation updates ([README.md](README.md))
-  - Build/CI configuration ([.github/](.github/), [Makefile](Makefile), [.pre-commit-config.yaml](.pre-commit-config.yaml))
-  - AI instructions ([AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md))
+  - Build/CI configuration ([.github/](.github/), [.pre-commit-config.yaml](.pre-commit-config.yaml))
+  - AI instructions ([AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), [.aiignore](.aiignore))
 - **What NOT to Commit**:
   - Active config files (`memon.config.json` - user-specific)
   - State files (`memon.state.json` - auto-generated, runtime-specific)
