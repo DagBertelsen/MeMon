@@ -1,0 +1,12 @@
+# Runtime state file (auto-generated, may mislead AI about current state)
+memon.state.json
+
+# User config (may contain sensitive network info)
+memon.config.json
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# IDE internals
+.cursor/
