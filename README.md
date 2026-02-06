@@ -2,6 +2,47 @@
 
 A Python Auto-Responder / Time Trigger script for MeshMonitor that monitors home network health (router and DNS resolvers) and outputs JSON alerts only when notifications should fire. Implements failure streak tracking with backoff logic to prevent alert spam.
 
+## Table of Contents
+
+- [Script Overview](#script-overview)
+  - [Use Cases](#use-cases)
+- [Execution Modes](#execution-modes)
+  - [Auto Responder Mode (Manual Status Checks)](#auto-responder-mode-manual-status-checks)
+  - [Timer Trigger Mode (Scheduled Monitoring)](#timer-trigger-mode-scheduled-monitoring)
+  - [Mode Detection](#mode-detection)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Configuration](#configuration)
+  - [Configuration Schema](#configuration-schema)
+  - [Configuration Fields](#configuration-fields)
+  - [Use Cases and Configuration](#use-cases-and-configuration)
+  - [Example Configurations](#example-configurations)
+- [MeshMonitor Setup](#meshmonitor-setup)
+  - [Auto Responder Setup (Manual Triggering)](#auto-responder-setup-manual-triggering)
+  - [Timer Trigger Setup (Automated Scheduling)](#timer-trigger-setup-automated-scheduling)
+  - [Script Path Configuration](#script-path-configuration)
+  - [Related Documentation](#related-documentation)
+- [How It Works](#how-it-works)
+  - [Execution Flow](#execution-flow)
+  - [State Management](#state-management)
+  - [Timeout Protection](#timeout-protection)
+  - [Partial Recovery Alerts](#partial-recovery-alerts)
+  - [Alert Suppression Logic](#alert-suppression-logic)
+- [Troubleshooting](#troubleshooting)
+- [Advanced Usage](#advanced-usage)
+  - [Debug Mode](#debug-mode)
+  - [Custom Message Templates](#custom-message-templates)
+  - [UTF-8 and International Characters](#utf-8-and-international-characters)
+  - [Monitoring Multiple Networks](#monitoring-multiple-networks)
+  - [Integration with Other Scripts](#integration-with-other-scripts)
+- [License](#license)
+- [Development & Testing](#development--testing)
+  - [Running Tests](#running-tests)
+  - [Automated Testing](#automated-testing)
+  - [Test Coverage](#test-coverage)
+  - [Contributing](#contributing)
+- [See Also](#see-also)
+
 ## Script Overview
 
 This script continuously monitors your network infrastructure:
@@ -340,9 +381,9 @@ For Timer Triggers when you want to minimize false positives:
 
 ## MeshMonitor Setup
 
-The script can be configured in MeshMonitor in two ways: as an **Auto Responder** (manual triggering) or as a **Timer Trigger** (automated scheduling). Choose the method that best fits your needs.
+The script supports two MeshMonitor integration methods that can be used **independently or together**: **Auto Responder** for manual on-demand checks, and **Timer Triggers** for automated scheduled monitoring. You can configure one or both depending on your needs.
 
-### Option 1: Auto Responder (Manual Triggering)
+### Auto Responder Setup (Manual Triggering)
 
 Use this method when you want to manually trigger network checks by sending messages to your MeshMonitor node.
 
@@ -378,7 +419,7 @@ Auto Responder mode is stateless and ignores `mustFailCount` and `alertBackoffSe
 2. The script will run and return current network status
 3. You'll always receive a response: a status report or a help message listing available commands
 
-### Option 2: Timer Triggers (Automated Scheduling)
+### Timer Trigger Setup (Automated Scheduling)
 
 Use this method when you want the script to run automatically on a schedule. This is ideal for continuous monitoring.
 
