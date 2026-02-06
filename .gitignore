@@ -32,6 +32,9 @@ ENV/
 ehthumbs.db
 Thumbs.db
 
+# Internal planning docs
+docs/plans/
+
 # Temporary files
 *.tmp
 *.log
