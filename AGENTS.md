@@ -347,6 +347,7 @@ The version is defined in `__version__` at the top of [memon.py](memon.py). When
   - **Default**: All commits are to local repository only (do not push to GitHub)
   - **GitHub Push**: Only push to GitHub when explicitly requested (e.g., "push to GitHub")
   - When user says "commit" without mentioning GitHub, commit locally only
+  - **Before pushing to GitHub**: Ask the user if the version should be bumped. If the user confirms a version bump, update `__version__` in `memon.py` and add release notes to `CHANGELOG.md` before pushing
 - **GitHub Integration**:
   - GitHub Actions automatically runs tests on push/PR (see [.github/workflows/test.yml](.github/workflows/test.yml))
   - Pre-commit hooks run tests locally before commits (if installed)
