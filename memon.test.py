@@ -2033,5 +2033,318 @@ class TestTimerTriggerModeUnchanged(unittest.TestCase):
         mock_emit.assert_not_called()
 
 
+class TestDebugOutput(unittest.TestCase):
+    """Test debug logging output goes to stderr and respects debug flag."""
+
+    def test_debug_log_writes_to_stderr(self):
+        """_debug_log writes to stderr when debug=True."""
+        with patch('sys.stderr', new_callable=lambda: open.__class__.__new__(type(sys.stderr))) as mock_stderr:
+            import io
+            buf = io.StringIO()
+            with patch('sys.stderr', buf):
+                memon._debug_log("Test", "hello world", True)
+            output = buf.getvalue()
+            self.assertIn("[Test] hello world", output)
+
+    def test_debug_log_silent_when_disabled(self):
+        """_debug_log produces no output when debug=False."""
+        import io
+        buf = io.StringIO()
+        with patch('sys.stderr', buf):
+            memon._debug_log("Test", "should not appear", False)
+        self.assertEqual(buf.getvalue(), "")
+
+    @patch('memon.check_router_https')
+    def test_router_success_debug(self, mock_https):
+        """Router check logs OK to stderr when debug=True and check passes."""
+        import io
+        mock_https.return_value = True
+        router_check = {"method": "https", "host": "192.168.1.1", "insecureTls": False}
+        buf = io.StringIO()
+        with patch('sys.stderr', buf):
+            memon.check_router(router_check, 2500, debug=True)
+        output = buf.getvalue()
+        self.assertIn("[Router] OK:", output)
+        self.assertIn("192.168.1.1", output)
+
+    @patch('memon.check_router_https')
+    def test_router_failure_debug(self, mock_https):
+        """Router check logs FAIL to stderr when debug=True and check fails."""
+        import io
+        mock_https.return_value = False
+        router_check = {"method": "https", "host": "192.168.1.1", "insecureTls": False}
+        buf = io.StringIO()
+        with patch('sys.stderr', buf):
+            memon.check_router(router_check, 2500, debug=True)
+        output = buf.getvalue()
+        self.assertIn("[Router] FAIL:", output)
+
+    @patch('memon.check_router_https')
+    def test_router_no_debug_output_when_disabled(self, mock_https):
+        """Router check produces no stderr when debug=False."""
+        import io
+        mock_https.return_value = False
+        router_check = {"method": "https", "host": "192.168.1.1", "insecureTls": False}
+        buf = io.StringIO()
+        with patch('sys.stderr', buf):
+            memon.check_router(router_check, 2500, debug=False)
+        self.assertEqual(buf.getvalue(), "")
+
+    @patch('memon.check_dns')
+    def test_dns_success_debug(self, mock_check_dns):
+        """DNS check logs OK to stderr when debug=True and check passes."""
+        import io
+        mock_check_dns.return_value = (True, "")
+        dns_checks = [{"name": "Google", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"}]
+        buf = io.StringIO()
+        with patch('sys.stderr', buf):
+            memon.check_all_dns(dns_checks, 2500, 5.0, debug=True)
+        output = buf.getvalue()
+        self.assertIn("[DNS] OK:", output)
+        self.assertIn("Google", output)
+
+    @patch('memon.check_dns')
+    def test_dns_failure_debug(self, mock_check_dns):
+        """DNS check logs FAIL to stderr when debug=True and check fails."""
+        import io
+        mock_check_dns.return_value = (False, "SERVFAIL")
+        dns_checks = [{"name": "Google", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"}]
+        buf = io.StringIO()
+        with patch('sys.stderr', buf):
+            memon.check_all_dns(dns_checks, 2500, 5.0, debug=True)
+        output = buf.getvalue()
+        self.assertIn("[DNS] FAIL:", output)
+        self.assertIn("SERVFAIL", output)
+
+    @patch('memon.check_dns')
+    def test_dns_no_debug_output_when_disabled(self, mock_check_dns):
+        """DNS check produces no stderr when debug=False."""
+        import io
+        mock_check_dns.return_value = (False, "SERVFAIL")
+        dns_checks = [{"name": "Google", "server": "8.8.8.8", "qname": "google.com", "rrtype": "A"}]
+        buf = io.StringIO()
+        with patch('sys.stderr', buf):
+            memon.check_all_dns(dns_checks, 2500, 5.0, debug=False)
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_load_state_debug_output(self):
+        """load_state logs state values to stderr when debug=True."""
+        import io
+        test_state = {"failStreak": 2, "downNotified": True, "lastAlertTs": 100}
+        buf = io.StringIO()
+        with patch('os.path.exists', return_value=True):
+            with patch('builtins.open', mock_open(read_data=json.dumps(test_state))):
+                with patch('sys.stderr', buf):
+                    memon.load_state("test.json", debug=True)
+        output = buf.getvalue()
+        self.assertIn("[State] Loaded:", output)
+        self.assertIn("failStreak=2", output)
+
+    def test_load_state_no_debug_when_disabled(self):
+        """load_state produces no stderr when debug=False."""
+        import io
+        buf = io.StringIO()
+        with patch('os.path.exists', return_value=False):
+            with patch('sys.stderr', buf):
+                memon.load_state("test.json", debug=False)
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_save_state_debug_output(self):
+        """save_state logs confirmation to stderr when debug=True."""
+        import io
+        test_state = {"failStreak": 3, "downNotified": True, "lastAlertTs": 100}
+        buf = io.StringIO()
+        with patch('builtins.open', mock_open()):
+            with patch('sys.stderr', buf):
+                memon.save_state(test_state, "test.json", debug=True)
+        output = buf.getvalue()
+        self.assertIn("[State] Saved:", output)
+
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.emit_alert')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    def test_timer_trigger_alert_decision_debug(self, mock_load_config, mock_check_router,
+                                                 mock_emit, mock_load_state, mock_save_state):
+        """Timer Trigger mode logs alert decision to stderr when debug=True."""
+        import io
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 900,
+            "debug": True,
+            "routerCheck": {},
+            "dnsChecks": [],
+            "messages": {}
+        }
+        mock_load_state.return_value = {
+            "failStreak": 0,
+            "downNotified": False,
+            "lastAlertTs": 0,
+            "lastStatus": None,
+            "lastFailedDns": []
+        }
+        mock_check_router.return_value = True
+        buf = io.StringIO()
+        with patch('sys.stderr', buf):
+            memon.main()
+        output = buf.getvalue()
+        self.assertIn("[Alert]", output)
+        self.assertIn("fire_down=", output)
+
+    @patch.dict('os.environ', {'MESSAGE': 'status'})
+    @patch('memon.emit_alert')
+    @patch('memon.check_all_dns')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    def test_auto_responder_mode_debug(self, mock_load_config, mock_check_router,
+                                        mock_check_dns, mock_emit):
+        """Auto Responder mode logs mode and config to stderr when debug=True."""
+        import io
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "debug": True,
+            "routerCheck": {},
+            "dnsChecks": [],
+            "messages": {}
+        }
+        mock_check_router.return_value = True
+        mock_check_dns.return_value = ([], [])
+        buf = io.StringIO()
+        with patch('sys.stderr', buf):
+            memon.main()
+        output = buf.getvalue()
+        self.assertIn("[Mode] auto_responder", output)
+        self.assertIn("[Config]", output)
+
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('memon.save_state')
+    @patch('memon.load_state')
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    def test_no_debug_output_when_disabled(self, mock_load_config, mock_check_router,
+                                            mock_load_state, mock_save_state):
+        """No debug output on stderr when debug=False (Timer Trigger mode)."""
+        import io
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "mustFailCount": 3,
+            "alertBackoffSeconds": 900,
+            "debug": False,
+            "routerCheck": {},
+            "dnsChecks": [],
+            "messages": {}
+        }
+        mock_load_state.return_value = {
+            "failStreak": 0,
+            "downNotified": False,
+            "lastAlertTs": 0,
+            "lastStatus": None,
+            "lastFailedDns": []
+        }
+        mock_check_router.return_value = True
+        buf = io.StringIO()
+        with patch('sys.stderr', buf):
+            memon.main()
+        self.assertEqual(buf.getvalue(), "")
+
+
+class TestBuildDnsStatusList(unittest.TestCase):
+    """Test the _build_dns_status_list helper."""
+
+    def test_all_ok(self):
+        """All DNS checks OK returns correct list."""
+        dns_checks = [
+            {"name": "Google", "server": "8.8.8.8"},
+            {"name": "Cloudflare", "server": "1.1.1.1"}
+        ]
+        result = memon._build_dns_status_list(dns_checks, [])
+        self.assertEqual(result, ["Google OK", "Cloudflare OK"])
+
+    def test_all_fail(self):
+        """All DNS checks failed returns correct list."""
+        dns_checks = [
+            {"name": "Google", "server": "8.8.8.8"},
+            {"name": "Cloudflare", "server": "1.1.1.1"}
+        ]
+        result = memon._build_dns_status_list(dns_checks, ["Google", "Cloudflare"])
+        self.assertEqual(result, ["Google FAIL", "Cloudflare FAIL"])
+
+    def test_mixed_status(self):
+        """Mixed DNS status returns correct list."""
+        dns_checks = [
+            {"name": "Google", "server": "8.8.8.8"},
+            {"name": "Cloudflare", "server": "1.1.1.1"},
+            {"name": "Quad9", "server": "9.9.9.9"}
+        ]
+        result = memon._build_dns_status_list(dns_checks, ["Cloudflare"])
+        self.assertEqual(result, ["Google OK", "Cloudflare FAIL", "Quad9 OK"])
+
+    def test_empty_checks(self):
+        """Empty DNS checks returns empty list."""
+        result = memon._build_dns_status_list([], [])
+        self.assertEqual(result, [])
+
+    def test_fallback_name(self):
+        """DNS check without name uses fallback DNS-N."""
+        dns_checks = [{"server": "8.8.8.8"}]
+        result = memon._build_dns_status_list(dns_checks, [])
+        self.assertEqual(result, ["DNS-0 OK"])
+
+
+class TestCheckRouterHttpRequest(unittest.TestCase):
+    """Test the _check_router_http_request helper."""
+
+    @patch('urllib.request.urlopen')
+    def test_http_request_success(self, mock_urlopen):
+        """HTTP request succeeds with 200 response."""
+        mock_response = Mock()
+        mock_response.getcode.return_value = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        result = memon._check_router_http_request("http://192.168.1.1", 2500)
+        self.assertTrue(result)
+
+    @patch('urllib.request.urlopen')
+    def test_https_request_with_ssl_context(self, mock_urlopen):
+        """HTTPS request passes SSL context through."""
+        mock_response = Mock()
+        mock_response.getcode.return_value = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+        ssl_context = ssl.create_default_context()
+
+        result = memon._check_router_http_request("https://192.168.1.1", 2500, ssl_context)
+        self.assertTrue(result)
+        call_kwargs = mock_urlopen.call_args[1]
+        self.assertIn('context', call_kwargs)
+
+    @patch('urllib.request.urlopen')
+    def test_http_no_ssl_context(self, mock_urlopen):
+        """HTTP request without SSL context does not pass context."""
+        mock_response = Mock()
+        mock_response.getcode.return_value = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        memon._check_router_http_request("http://192.168.1.1", 2500)
+        call_kwargs = mock_urlopen.call_args[1]
+        self.assertNotIn('context', call_kwargs)
+
+    @patch('urllib.request.urlopen')
+    def test_connection_failure(self, mock_urlopen):
+        """Connection failure returns False."""
+        mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
+        result = memon._check_router_http_request("http://192.168.1.1", 2500)
+        self.assertFalse(result)
+
+    @patch('urllib.request.urlopen')
+    def test_unexpected_exception(self, mock_urlopen):
+        """Unexpected exception returns False (catch-all safety)."""
+        mock_urlopen.side_effect = RuntimeError("unexpected")
+        result = memon._check_router_http_request("http://192.168.1.1", 2500)
+        self.assertFalse(result)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -19,6 +19,7 @@ import sys
 import socket
 import struct
 import time
+import traceback
 import ssl
 import urllib.request
 import urllib.error
@@ -83,6 +84,9 @@ DEFAULT_HTTP_PORT = 80
 DEFAULT_HTTPS_PORT = 443
 DEFAULT_DNS_PORT = 53
 
+# Maximum UDP DNS response size (RFC 1035 standard, without EDNS)
+DNS_UDP_MAX_SIZE = 512
+
 
 def _get_script_dir() -> str:
     """
@@ -96,6 +100,12 @@ def _get_script_dir() -> str:
 
 # Script directory for resolving relative paths
 SCRIPT_DIR = _get_script_dir()
+
+
+def _debug_log(tag: str, message: str, debug: bool) -> None:
+    """Print a debug message to stderr if debug mode is enabled."""
+    if debug:
+        print(f"[{tag}] {message}", file=sys.stderr)
 
 
 def _ms_to_seconds(ms: int) -> float:
@@ -195,7 +205,7 @@ def _get_dns_display_name(check: Dict[str, Any], index: int) -> str:
 def _log_router_failure(method: str, host: str, port: int, reason: str, debug: bool) -> None:
     """
     Log router check failure message if debug mode is enabled.
-    
+
     Args:
         method: Router check method
         host: Router hostname or IP
@@ -203,8 +213,7 @@ def _log_router_failure(method: str, host: str, port: int, reason: str, debug: b
         reason: Failure reason
         debug: If True, print debug message
     """
-    if debug:
-        print(f"[Router Check] Failed: {method} {host}:{port} - {reason}", file=sys.stdout)
+    _debug_log("Router", f"FAIL: {method} {host}:{port} - {reason}", debug)
 
 
 def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
@@ -234,7 +243,7 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             user_config = json.load(f)
-            # Deep merge defaults with user config
+            # Merge user config over defaults (shallow for top-level, deep for nested dicts)
             config.update(user_config)
             if "messages" in user_config:
                 config["messages"].update(user_config["messages"])
@@ -247,86 +256,87 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     return config
 
 
-def load_state(state_path: Optional[str] = None) -> Dict[str, Any]:
+def load_state(state_path: Optional[str] = None, debug: bool = False) -> Dict[str, Any]:
     """
     Load state file or create default state if missing.
-    
+
     Args:
         state_path: Path to state JSON file. If None, uses script-relative path.
-        
+        debug: If True, print debug messages to stderr.
+
     Returns:
         State dictionary with defaults applied
     """
     # Resolve state path relative to script directory if not provided
     if state_path is None:
         state_path = os.path.join(SCRIPT_DIR, "memon.state.json")
-    
+
     state = DEFAULT_STATE.copy()
-    
+
     if os.path.exists(state_path):
         try:
             with open(state_path, 'r', encoding='utf-8') as f:
                 user_state = json.load(f)
                 state.update(user_state)
-                
-                # Clamp lastAlertTs if in future (clock skew protection)
+
+                # Clamp lastAlertTs if in future (prevents infinite backoff if clock jumped forward then corrected)
                 current_time = int(time.time())
-                if state.get("lastAlertTs", 0) > current_time:
+                old_ts = state.get("lastAlertTs", 0)
+                if old_ts > current_time:
                     state["lastAlertTs"] = current_time
+                    _debug_log("State", f"Clock skew detected, clamped lastAlertTs from {old_ts} to {current_time}", debug)
         except (json.JSONDecodeError, IOError):
             # If state file is corrupted, use defaults
-            pass
-    
+            _debug_log("State", "State file corrupted, using defaults", debug)
+
+    _debug_log("State", f"Loaded: failStreak={state['failStreak']}, downNotified={state['downNotified']}, lastAlertTs={state['lastAlertTs']}", debug)
     return state
 
 
-def save_state(state: Dict[str, Any], state_path: Optional[str] = None) -> None:
+def save_state(state: Dict[str, Any], state_path: Optional[str] = None, debug: bool = False) -> None:
     """
     Write state to JSON file.
-    
+
     Args:
         state: State dictionary to save
         state_path: Path to state JSON file. If None, uses script-relative path.
-        
+        debug: If True, print debug messages to stderr.
+
     Raises:
         SystemExit: If state file cannot be written (exits with stderr only)
     """
     # Resolve state path relative to script directory if not provided
     if state_path is None:
         state_path = os.path.join(SCRIPT_DIR, "memon.state.json")
-    
+
     try:
         with open(state_path, 'w', encoding='utf-8') as f:
             json.dump(state, f, indent=2)
+        _debug_log("State", f"Saved: failStreak={state.get('failStreak')}, downNotified={state.get('downNotified')}", debug)
     except IOError as e:
         print(f"Error saving state file {state_path}: {e}", file=sys.stderr)
         sys.exit(1)
 
 
-def check_router_https(url: str, insecure_tls: bool, timeout_ms: int) -> bool:
+def _check_router_http_request(url: str, timeout_ms: int, ssl_context: Any = None) -> bool:
     """
-    Check router via HTTPS request.
-    
+    Perform HTTP/HTTPS request to check router connectivity.
+
     Args:
-        url: HTTPS URL to check
-        insecure_tls: If True, disable TLS certificate validation
+        url: URL to check
         timeout_ms: Request timeout in milliseconds
-        
+        ssl_context: SSL context for HTTPS requests, or None for HTTP
+
     Returns:
-        True if router responds successfully, False otherwise
+        True if router responds with 2xx/3xx, False otherwise
     """
     try:
-        # Create SSL context
-        ssl_context = ssl.create_default_context()
-        if insecure_tls:
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-        
-        # Create request with timeout
         req = urllib.request.Request(url)
         timeout_sec = _ms_to_seconds(timeout_ms)
-        
-        with urllib.request.urlopen(req, context=ssl_context, timeout=timeout_sec) as response:
+        kwargs = {"timeout": timeout_sec}
+        if ssl_context is not None:
+            kwargs["context"] = ssl_context
+        with urllib.request.urlopen(req, **kwargs) as response:
             # Any 2xx or 3xx response is considered success
             return 200 <= response.getcode() < 400
     except (urllib.error.URLError, urllib.error.HTTPError, OSError, ssl.SSLError):
@@ -336,30 +346,37 @@ def check_router_https(url: str, insecure_tls: bool, timeout_ms: int) -> bool:
         return False
 
 
-def check_router_http(url: str, timeout_ms: int) -> bool:
+def check_router_https(url: str, insecure_tls: bool, timeout_ms: int) -> bool:
     """
-    Check router via HTTP request.
-    
+    Check router via HTTPS request.
+
     Args:
-        url: HTTP URL to check
+        url: HTTPS URL to check
+        insecure_tls: If True, disable TLS certificate validation
         timeout_ms: Request timeout in milliseconds
-        
+
     Returns:
         True if router responds successfully, False otherwise
     """
-    try:
-        # Create request with timeout
-        req = urllib.request.Request(url)
-        timeout_sec = _ms_to_seconds(timeout_ms)
-        
-        with urllib.request.urlopen(req, timeout=timeout_sec) as response:
-            # Any 2xx or 3xx response is considered success
-            return 200 <= response.getcode() < 400
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError):
-        return False
-    # Catch any other unexpected exceptions to prevent script crash
-    except Exception:
-        return False
+    ssl_context = ssl.create_default_context()
+    if insecure_tls:
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+    return _check_router_http_request(url, timeout_ms, ssl_context)
+
+
+def check_router_http(url: str, timeout_ms: int) -> bool:
+    """
+    Check router via HTTP request.
+
+    Args:
+        url: HTTP URL to check
+        timeout_ms: Request timeout in milliseconds
+
+    Returns:
+        True if router responds successfully, False otherwise
+    """
+    return _check_router_http_request(url, timeout_ms)
 
 
 def check_router_tcp(host: str, timeout_ms: int, port: int = 80) -> bool:
@@ -398,7 +415,7 @@ def check_router(router_check: Dict[str, Any], timeout_ms: int, debug: bool = Fa
     Args:
         router_check: Router check configuration
         timeout_ms: Timeout in milliseconds
-        debug: If True, print failure messages to stdout
+        debug: If True, print debug messages to stderr
         
     Returns:
         True if router check passes, False otherwise
@@ -413,22 +430,19 @@ def check_router(router_check: Dict[str, Any], timeout_ms: int, debug: bool = Fa
     
     if method == "tcp":
         result = check_router_tcp(host, timeout_ms, port)
-        if not result:
-            _log_router_failure(method, host, port, "TCP connection failed", debug)
-        return result
     elif method == "http":
         url = f"http://{host}:{port}"
         result = check_router_http(url, timeout_ms)
-        if not result:
-            _log_router_failure(method, host, port, "HTTP request failed", debug)
-        return result
     else:  # https (default)
         url = f"https://{host}:{port}"
         insecure_tls = router_check.get("insecureTls", False)
         result = check_router_https(url, insecure_tls, timeout_ms)
-        if not result:
-            _log_router_failure(method, host, port, "HTTPS request failed", debug)
-        return result
+
+    if result:
+        _debug_log("Router", f"OK: {method} {host}:{port}", debug)
+    else:
+        _log_router_failure(method, host, port, f"{method.upper()} check failed", debug)
+    return result
 
 
 def _encode_domain_name(domain: str) -> bytes:
@@ -522,7 +536,7 @@ def _parse_dns_response(data: bytes, expected_rrtype: str) -> Tuple[bool, str]:
         offset = 12
         # Skip QNAME
         while offset < len(data) and data[offset] != 0:
-            if data[offset] & 0xC0 == 0xC0:  # Compression pointer
+            if data[offset] & 0xC0 == 0xC0:  # Compression pointer (RFC 1035 4.1.4) - name continues at pointed-to offset
                 offset += 2
                 break
             else:
@@ -625,7 +639,7 @@ def check_dns(server: str, qname: str, rrtype: str, timeout_ms: int) -> Tuple[bo
             sock.sendto(query, (server, DEFAULT_DNS_PORT))
             
             # Receive response
-            data, _ = sock.recvfrom(512)  # DNS responses are typically < 512 bytes
+            data, _ = sock.recvfrom(DNS_UDP_MAX_SIZE)
             
             # Parse and validate response
             success, error_msg = _parse_dns_response(data, rrtype)
@@ -654,7 +668,7 @@ def check_all_dns(dns_checks: List[Dict[str, Any]], timeout_ms: int, max_total_t
         dns_checks: List of DNS check configurations
         timeout_ms: Timeout per DNS check in milliseconds
         max_total_time: Maximum total time allowed (seconds)
-        debug: If True, print failure messages to stdout
+        debug: If True, print debug messages to stderr
         
     Returns:
         Tuple of (failed_names: List[str], all_names: List[str])
@@ -688,24 +702,22 @@ def check_all_dns(dns_checks: List[Dict[str, Any]], timeout_ms: int, max_total_t
             if remaining_time <= 0:
                 # Out of time, mark remaining as failed
                 failed_names.append(name)
-                if debug:
-                    print(f"[DNS Check] Failed: {name} ({server}) querying {qname} - Timeout (out of time)", file=sys.stdout)
+                _debug_log("DNS", f"FAIL: {name} ({server}) querying {qname} - Timeout (out of time)", debug)
                 continue
-            
+
             try:
                 success, error_msg = future.result(timeout=min(remaining_time, _ms_to_seconds(timeout_ms) + 0.5))
                 if not success:
                     failed_names.append(name)
-                    if debug:
-                        print(f"[DNS Check] Failed: {name} ({server}) querying {qname} - {error_msg}", file=sys.stdout)
+                    _debug_log("DNS", f"FAIL: {name} ({server}) querying {qname} - {error_msg}", debug)
+                else:
+                    _debug_log("DNS", f"OK: {name} ({server}) querying {qname}", debug)
             except FutureTimeoutError:
                 failed_names.append(name)
-                if debug:
-                    print(f"[DNS Check] Failed: {name} ({server}) querying {qname} - Timeout waiting for response", file=sys.stdout)
+                _debug_log("DNS", f"FAIL: {name} ({server}) querying {qname} - Timeout waiting for response", debug)
             except Exception as e:
                 failed_names.append(name)
-                if debug:
-                    print(f"[DNS Check] Failed: {name} ({server}) querying {qname} - Exception: {str(e)}", file=sys.stdout)
+                _debug_log("DNS", f"FAIL: {name} ({server}) querying {qname} - Exception: {str(e)}", debug)
     
     return failed_names, all_names
 
@@ -888,6 +900,16 @@ def _format_alert_message(status: Optional[str], messages: Dict[str, str], faile
         return "Network issue detected"
 
 
+def _build_dns_status_list(dns_checks: List[Dict[str, Any]], failed_dns: List[str]) -> List[str]:
+    """Build list of 'Name OK/FAIL' strings for all DNS checks."""
+    dns_statuses = []
+    for i, check in enumerate(dns_checks):
+        name = _get_dns_display_name(check, i)
+        status = "FAIL" if name in failed_dns else "OK"
+        dns_statuses.append(f"{name} {status}")
+    return dns_statuses
+
+
 def format_status_report(router_ok: bool, failed_dns: List[str], all_dns: List[str],
                         dns_checks: List[Dict[str, Any]]) -> str:
     """
@@ -925,14 +947,7 @@ def format_status_report(router_ok: bool, failed_dns: List[str], all_dns: List[s
 
     # Router OK, mixed DNS status - build detailed report
     # Format: "Router OK, DNS: Name1 OK, Name2 FAIL, Name3 OK"
-    dns_statuses = []
-    for i, check in enumerate(dns_checks):
-        name = _get_dns_display_name(check, i)
-        status = "FAIL" if name in failed_dns else "OK"
-        dns_statuses.append(f"{name} {status}")
-
-    # Join with comma-space separator
-    dns_report = ", ".join(dns_statuses)
+    dns_report = ", ".join(_build_dns_status_list(dns_checks, failed_dns))
     message = f"Router OK, DNS: {dns_report}"
 
     # Truncate if exceeds MAX_MESSAGE_LENGTH (200 chars)
@@ -994,13 +1009,7 @@ def format_dns_report(router_ok: bool, failed_dns: List[str], all_dns: List[str]
         return "DNS: All OK"
 
     # Mixed status - show individual results
-    dns_statuses = []
-    for i, check in enumerate(dns_checks):
-        name = _get_dns_display_name(check, i)
-        status = "FAIL" if name in failed_dns else "OK"
-        dns_statuses.append(f"{name} {status}")
-
-    dns_report = ", ".join(dns_statuses)
+    dns_report = ", ".join(_build_dns_status_list(dns_checks, failed_dns))
     message = f"DNS: {dns_report}"
 
     if len(message) > MAX_MESSAGE_LENGTH:
@@ -1043,79 +1052,48 @@ def _update_state(state: Dict[str, Any], fail_streak: int, down_notified: bool,
     state["lastFailedDns"] = failed_dns
 
 
-def main() -> None:
+def _run_auto_responder(router_ok: bool, failed_dns: List[str], all_dns: List[str],
+                        dns_checks: List[Dict[str, Any]], ar_command: str, debug: bool) -> None:
     """
-    Main function: orchestrate checks and alert logic with timeout protection.
-    Supports two execution modes:
-    - Auto Responder: Stateless, always returns current status
-    - Timer Trigger: Stateful, conditional alerts with backoff
-    """
-    start_time = time.time()
-    # Cache current time to avoid multiple system calls and ensure consistency
-    current_time = int(time.time())
+    Handle Auto Responder mode: emit report based on command (stateless).
 
-    # Load configuration
-    config = load_config()
-    timeout_ms = config.get("timeoutMs", 2500)
+    Args:
+        router_ok: Whether router check passed
+        failed_dns: List of failed DNS resolver names
+        all_dns: List of all DNS resolver names
+        dns_checks: DNS check configurations
+        ar_command: Parsed Auto Responder command
+        debug: If True, print debug messages to stderr
+    """
+    if ar_command == "router":
+        message = format_router_report(router_ok)
+    elif ar_command == "dns":
+        message = format_dns_report(router_ok, failed_dns, all_dns, dns_checks)
+    else:  # "status" / "all"
+        message = format_status_report(router_ok, failed_dns, all_dns, dns_checks)
+    _debug_log("Alert", f"Emitting: \"{message}\"", debug)
+    emit_alert(message)
+
+
+def _run_timer_trigger(config: Dict[str, Any], debug: bool, router_ok: bool,
+                       failed_dns: List[str], all_dns: List[str], current_time: int) -> None:
+    """
+    Handle Timer Trigger mode: stateful alert logic with failure tracking and backoff.
+
+    Args:
+        config: Full configuration dictionary
+        debug: If True, print debug messages to stderr
+        router_ok: Whether router check passed
+        failed_dns: List of failed DNS resolver names
+        all_dns: List of all DNS resolver names
+        current_time: Current Unix timestamp
+    """
     must_fail_count = config.get("mustFailCount", 3)
     backoff_seconds = config.get("alertBackoffSeconds", 900)
-    debug = config.get("debug", False)
     messages = config.get("messages", {})
-    router_check = config.get("routerCheck", {})
-    dns_checks = config.get("dnsChecks", [])
 
-    # Detect execution mode
-    mode = detect_execution_mode()
-
-    # Parse command for Auto Responder mode (before network checks to optimize)
-    ar_command = None  # type: Optional[str]
-    if mode == "auto_responder":
-        ar_message = os.environ.get("MESSAGE", "")
-        ar_command = parse_auto_responder_command(ar_message)
-
-        # Help and version commands need no network checks
-        if ar_command == "help":
-            emit_alert(format_help_message())
-            return
-        if ar_command == "version":
-            emit_alert("MeMon v" + __version__)
-            return
-
-    # Calculate remaining time (ensure we finish before MeshMonitor timeout)
-    elapsed = time.time() - start_time
-    remaining_time = MESHMONITOR_TIMEOUT - elapsed - TIMEOUT_SAFETY_MARGIN
-    if remaining_time <= 0:
-        # Already out of time, exit silently
-        return
-
-    # Check router first
-    router_ok = check_router(router_check, timeout_ms, debug)
-
-    # Check DNS if router is up (skip for router-only command)
-    failed_dns = []
-    all_dns = []
-    if router_ok and ar_command != "router":
-        # Check DNS with remaining time
-        elapsed = time.time() - start_time
-        remaining_time = MESHMONITOR_TIMEOUT - elapsed - TIMEOUT_SAFETY_MARGIN
-        if remaining_time > 0:
-            failed_dns, all_dns = check_all_dns(dns_checks, timeout_ms, remaining_time, debug)
-
-    # Branch based on execution mode
-    if mode == "auto_responder":
-        # Auto Responder: Emit report based on command (stateless)
-        if ar_command == "router":
-            message = format_router_report(router_ok)
-        elif ar_command == "dns":
-            message = format_dns_report(router_ok, failed_dns, all_dns, dns_checks)
-        else:  # "status" / "all"
-            message = format_status_report(router_ok, failed_dns, all_dns, dns_checks)
-        emit_alert(message)
-        return
-
-    # Timer Trigger: Existing logic (unchanged)
     # Load state
-    state = load_state()
+    state = load_state(debug=debug)
     fail_streak = state.get("failStreak", 0)
     down_notified = state.get("downNotified", False)
     last_alert_ts = state.get("lastAlertTs", 0)
@@ -1139,28 +1117,110 @@ def main() -> None:
     fire_partial_recovery = should_fire_partial_recovery_alert(last_status, status, down_notified,
                                                                 last_failed_dns, failed_dns)
 
+    _debug_log("Alert", f"status={status}, failStreak={fail_streak}/{must_fail_count}, "
+               f"fire_down={fire_down}, fire_up={fire_up}, fire_partial={fire_partial_recovery}", debug)
+
     # Emit alerts and update state
     if fire_down:
         message = _format_alert_message(status, messages, failed_dns)
+        _debug_log("Alert", f"Emitting DOWN: \"{message}\"", debug)
         emit_alert(message)
         down_notified = True
         last_alert_ts = current_time
 
     elif fire_up:
         message = messages.get("recovery", "Network connectivity restored")
+        _debug_log("Alert", f"Emitting UP: \"{message}\"", debug)
         emit_alert(message)
         down_notified = False
         last_alert_ts = current_time
 
     elif fire_partial_recovery:
-        # Partial recovery: routerDown → ispDown/upstreamDnsDown, or ispDown → upstreamDnsDown
+        # Partial recovery: routerDown -> ispDown/upstreamDnsDown, or ispDown -> upstreamDnsDown
         message = _format_alert_message(status, messages, failed_dns)
+        _debug_log("Alert", f"Emitting PARTIAL: \"{message}\"", debug)
         emit_alert(message)
         last_alert_ts = current_time
 
+    else:
+        _debug_log("Alert", "No alert fired", debug)
+
     # Save updated state
     _update_state(state, fail_streak, down_notified, last_alert_ts, status, failed_dns)
-    save_state(state)
+    save_state(state, debug=debug)
+
+
+def main() -> None:
+    """
+    Main function: orchestrate checks and alert logic with timeout protection.
+    Supports two execution modes:
+    - Auto Responder: Stateless, always returns current status
+    - Timer Trigger: Stateful, conditional alerts with backoff
+    """
+    start_time = time.time()
+    # Cache current time to avoid multiple system calls and ensure consistency
+    current_time = int(time.time())
+
+    # Load configuration
+    config = load_config()
+    timeout_ms = config.get("timeoutMs", 2500)
+    debug = config.get("debug", False)
+    router_check = config.get("routerCheck", {})
+    dns_checks = config.get("dnsChecks", [])
+
+    # Detect execution mode
+    mode = detect_execution_mode()
+
+    # Parse command for Auto Responder mode (before network checks to optimize)
+    ar_command = None  # type: Optional[str]
+    if mode == "auto_responder":
+        ar_message = os.environ.get("MESSAGE", "")
+        ar_command = parse_auto_responder_command(ar_message)
+        _debug_log("Mode", f"auto_responder, command={ar_command}", debug)
+
+        # Help and version commands need no network checks
+        if ar_command == "help":
+            emit_alert(format_help_message())
+            return
+        if ar_command == "version":
+            emit_alert("MeMon v" + __version__)
+            return
+    else:
+        _debug_log("Mode", "timer_trigger", debug)
+
+    _debug_log("Config", f"timeoutMs={timeout_ms}, mustFailCount={config.get('mustFailCount', 3)}, "
+               f"backoff={config.get('alertBackoffSeconds', 900)}s, dnsChecks={len(dns_checks)}", debug)
+
+    # Calculate remaining time (ensure we finish before MeshMonitor timeout)
+    elapsed = time.time() - start_time
+    remaining_time = MESHMONITOR_TIMEOUT - elapsed - TIMEOUT_SAFETY_MARGIN
+    if remaining_time <= 0:
+        _debug_log("Timing", "Out of time before network checks, exiting", debug)
+        return
+
+    # Check router first
+    router_ok = check_router(router_check, timeout_ms, debug)
+
+    _debug_log("Timing", f"After router check: elapsed={time.time() - start_time:.2f}s, "
+               f"remaining={MESHMONITOR_TIMEOUT - (time.time() - start_time) - TIMEOUT_SAFETY_MARGIN:.2f}s", debug)
+
+    # Check DNS if router is up (skip for router-only command)
+    failed_dns = []  # type: List[str]
+    all_dns = []  # type: List[str]
+    if router_ok and ar_command != "router":
+        # Check DNS with remaining time
+        elapsed = time.time() - start_time
+        remaining_time = MESHMONITOR_TIMEOUT - elapsed - TIMEOUT_SAFETY_MARGIN
+        if remaining_time > 0:
+            failed_dns, all_dns = check_all_dns(dns_checks, timeout_ms, remaining_time, debug)
+
+        _debug_log("Timing", f"After DNS checks: elapsed={time.time() - start_time:.2f}s", debug)
+
+    # Dispatch to mode-specific handler
+    if mode == "auto_responder":
+        _run_auto_responder(router_ok, failed_dns, all_dns, dns_checks, ar_command, debug)
+    else:
+        _run_timer_trigger(config, debug, router_ok, failed_dns, all_dns, current_time)
 
 
 if __name__ == "__main__":
@@ -1168,6 +1228,5 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         print(f"Error: Unexpected error in main(): {e}", file=sys.stderr)
-        import traceback
         traceback.print_exc(file=sys.stderr)
         sys.exit(1)
