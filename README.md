@@ -393,22 +393,22 @@ Use this method when you want to manually trigger network checks by sending mess
 1. Navigate to **Settings → Automation → Auto Responder** in MeshMonitor
 2. Click **"Add Trigger"**
 3. Configure the trigger:
-   - **Trigger**: Enter comma-separated patterns: `memon, memon {argument}`
+   - **Trigger**: Enter comma-separated patterns: `netcheck, netcheck {argument}`
    - **Type**: Select **"Script Ex"**
    - **Response**: Select your `memon.py` script
    - **Channel**: Select the channel to listen on (e.g., "Direct Messages")
 4. **Important**: MeshMonitor uses exact matching for triggers. You need **two comma-separated patterns** to support both the bare trigger word and subcommands:
-   - `memon` - Matches the trigger word alone (returns help)
-   - `memon {argument}` - Matches the trigger word followed by any argument (e.g., `memon status`, `memon router`, `memon dns`)
+   - `netcheck` - Matches the trigger word alone (returns help)
+   - `netcheck {argument}` - Matches the trigger word followed by any argument (e.g., `netcheck status`, `netcheck router`, `netcheck dns`)
 
 #### 2. Example Trigger Configuration
 
-Trigger field value: `memon, memon {argument}`
+Trigger field value: `netcheck, netcheck {argument}`
 
 | Pattern | Matches | Response |
 |---|---|---|
-| `memon` | `memon` (exact) | Help: lists available commands |
-| `memon {argument}` | `memon status`, `memon router`, `memon dns`, `memon version` | Requested report |
+| `netcheck` | `netcheck` (exact) | Help: lists available commands |
+| `netcheck {argument}` | `netcheck status`, `netcheck router`, `netcheck dns`, `netcheck version` | Requested report |
 
 #### 3. Configuration for Auto Responder
 
@@ -416,7 +416,7 @@ Auto Responder mode is stateless and ignores `mustFailCount` and `alertBackoffSe
 
 #### 4. Testing the Trigger
 
-1. Send a message matching your trigger pattern to your MeshMonitor node (e.g., `memon` or `memon status`)
+1. Send a message matching your trigger pattern to your MeshMonitor node (e.g., `netcheck` or `netcheck status`)
 2. The script will run and return current network status
 3. You'll always receive a response: a status report or a help message listing available commands
 
