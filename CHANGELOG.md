@@ -5,6 +5,14 @@ All notable changes to MeMon will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.2] - 2026-02-07
+
+### Fixed
+- Fix outdated README.md references to debug output going to stdout (now correctly documents stderr)
+
+### Changed
+- Add AI instruction to check README.md when changing code behavior (AGENTS.md)
+
 ## [1.1.1] - 2026-02-07
 
 ### Fixed
