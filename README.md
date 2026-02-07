@@ -66,7 +66,7 @@ The script uses failure streak tracking to distinguish between transient network
 
 ## Execution Modes
 
-The script automatically detects and operates in one of two modes based on how it's triggered in MeshMonitor:
+The script supports both Auto Responder and Timer Trigger modes, auto-detecting per execution based on how it's triggered in MeshMonitor:
 
 ### Auto Responder Mode (Manual Status Checks)
 
@@ -85,7 +85,7 @@ The script automatically detects and operates in one of two modes based on how i
 - `Router OK, DNS: Google OK, Cloudflare FAIL, Altibox OK` - Mixed status
 
 **Supported Commands**: Include a keyword after the trigger word to request a specific report:
-- `{trigger} status` - Full report (router + all DNS)
+- `{trigger} status` or `{trigger} all` - Full report (router + all DNS)
 - `{trigger} router` - Router-only check
 - `{trigger} dns` - DNS-only report
 - `{trigger} version` - Show script version

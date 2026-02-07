@@ -5,6 +5,20 @@ All notable changes to MeMon will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.3] - 2026-02-07
+
+### Fixed
+- Document `all` as alias for `status` command in README and help message output
+- Fix mode description: clarify both modes are supported simultaneously (not "one of two")
+
+### Changed
+- Update AGENTS.md Key Functions section to reflect v1.1.0 refactoring
+- Add missing `debug` config field to AGENTS.md Configuration Schema
+- Add release workflow automation notes and security guidelines to AGENTS.md
+
+### Added
+- GitHub Release automation workflow (`.github/workflows/release.yml`)
+
 ## [1.1.2] - 2026-02-07
 
 ### Fixed

@@ -4,7 +4,7 @@
 #   emoji: 🌐
 #   language: Python
 
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 
 """
 MeMon Network Health Monitor for MeshMonitor
@@ -1029,7 +1029,7 @@ def format_help_message() -> str:
     Returns:
         Help message string (fits within 200-char limit)
     """
-    return "Commands: status (full report), router (router only), dns (DNS only), version"
+    return "Commands: status/all (full report), router (router only), dns (DNS only), version"
 
 
 def _update_state(state: Dict[str, Any], fail_streak: int, down_notified: bool,

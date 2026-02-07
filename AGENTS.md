@@ -2,10 +2,12 @@
 
 ## Project Overview
 
-This project implements **MeMon**, a Python Auto-Responder / Time Trigger script for MeshMonitor that monitors router and DNS health. The script automatically detects its execution mode and operates in one of two ways:
+This project implements **MeMon**, a Python Auto-Responder / Time Trigger script for MeshMonitor that monitors router and DNS health. The script supports both Auto Responder and Timer Trigger modes, auto-detecting per execution based on environment variables:
 
 - **Auto Responder Mode**: Stateless, always returns immediate network status (for manual checks)
 - **Timer Trigger Mode**: Stateful, conditional alerts with failure streak tracking and backoff logic (for scheduled monitoring)
+
+A single MeMon installation handles both modes — no configuration needed to switch between them.
 
 **Project Status**: Production-ready, actively maintained
 
@@ -95,23 +97,27 @@ Core functions implemented in [memon.py](memon.py):
 
 **Configuration & State:**
 - `load_config()` - Load and validate config with defaults
-- `load_state()` - Load state file or create default (Timer Trigger only)
-- `save_state()` - Write state to JSON file (Timer Trigger only)
+- `load_state(state_path, debug)` - Load state file or create default (Timer Trigger only)
+- `save_state(state, state_path, debug)` - Write state to JSON file (Timer Trigger only)
 
-**Mode Detection:**
+**Mode Detection & Command Parsing:**
 - `detect_execution_mode()` - Detect Auto Responder vs Timer Trigger mode via environment variables
+- `parse_auto_responder_command(message)` - Parse command keyword from MESSAGE env var
 
 **Network Checks:**
 - `check_router()` - Perform router check (HTTPS, HTTP, or TCP socket connection)
-- `check_router_https()` - Check router via HTTPS request
-- `check_router_http()` - Check router via HTTP request
+- `check_router_https()` - Check router via HTTPS (delegates to `_check_router_http_request()`)
+- `check_router_http()` - Check router via HTTP (delegates to `_check_router_http_request()`)
 - `check_router_tcp()` - Check router via TCP socket connection
 - `check_dns()` - Check single DNS resolver using standard library socket
 - `check_all_dns()` - Check all DNS resolvers in parallel (with timeout)
 
 **Status & Alerting:**
 - `classify_status()` - Determine status classification (Timer Trigger only)
-- `format_status_report()` - Format immediate status report (Auto Responder only)
+- `format_status_report()` - Format immediate status report (Auto Responder: status/all command)
+- `format_router_report()` - Format router-only report (Auto Responder: router command)
+- `format_dns_report()` - Format DNS-only report (Auto Responder: dns command)
+- `format_help_message()` - Format help guide listing commands (Auto Responder: help/default)
 - `should_fire_down_alert()` - Check if DOWN alert should fire (Timer Trigger only)
 - `should_fire_up_alert()` - Check if UP alert should fire (Timer Trigger only)
 - `should_fire_partial_recovery_alert()` - Check if partial recovery alert should fire (Timer Trigger only)
@@ -119,7 +125,14 @@ Core functions implemented in [memon.py](memon.py):
 **Output:**
 - `replace_placeholders()` - Replace placeholders in message templates
 - `emit_alert()` - Output JSON to stdout
-- `main()` - Orchestrate checks and alert logic with mode branching
+- `main()` - Orchestrate checks, then delegate to `_run_auto_responder()` or `_run_timer_trigger()`
+
+**Key Internal Helpers** (prefixed with `_`, may change freely):
+- `_debug_log()` - Centralized debug logging to stderr
+- `_check_router_http_request()` - Shared HTTP/HTTPS request handler
+- `_build_dns_status_list()` - Build DNS status list for reports
+- `_run_auto_responder()` - Handle Auto Responder mode logic
+- `_run_timer_trigger()` - Handle Timer Trigger mode logic (state, streaks, backoff)
 
 ### Alert Logic
 
@@ -155,6 +168,7 @@ Configuration file (`memon.config.json`):
 - `timeoutMs`: Timeout per check in milliseconds (default: 2500)
 - `mustFailCount`: Consecutive failures before alerting (default: 3)
 - `alertBackoffSeconds`: Minimum time between alerts (default: 900)
+- `debug`: Enable debug logging to stderr (default: false)
 - `messages`: Alert message templates
   - `routerDown` - Router connectivity failure message
   - `ispDown` - All DNS resolvers failed message
@@ -275,10 +289,12 @@ This project uses [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH
 
 The version is defined in `__version__` at the top of [memon.py](memon.py). When releasing:
 1. Update `__version__` in `memon.py`
-2. Add entry to [CHANGELOG.md](CHANGELOG.md)
+2. Add entry to [CHANGELOG.md](CHANGELOG.md) (must be complete before pushing the tag)
 3. Commit with message: `Release vX.Y.Z`
-4. Tag with: `git tag vX.Y.Z`
-5. Push tag: `git push origin vX.Y.Z`
+4. Push the commit: `git push`
+5. Tag with: `git tag vX.Y.Z`
+6. Push tag: `git push origin vX.Y.Z`
+   - This automatically creates a GitHub Release with notes extracted from CHANGELOG.md (see [release.yml](.github/workflows/release.yml))
 
 ### Performance Expectations
 
@@ -328,6 +344,7 @@ The version is defined in `__version__` at the top of [memon.py](memon.py). When
 ### Git/GitHub Workflow
 
 - **Commit Guidelines**:
+  - **Never commit sensitive data** (passwords, usernames, emails, API keys, personal configurations, or any personally identifiable information) to the repository
   - Always run tests before committing: `python memon.test.py -v 2>&1`
   - Write clear, descriptive commit messages
   - Commit related changes together (logical units)
@@ -339,6 +356,7 @@ The version is defined in `__version__` at the top of [memon.py](memon.py). When
   - Build/CI configuration ([.github/](.github/), [.pre-commit-config.yaml](.pre-commit-config.yaml))
   - AI instructions ([AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), [.aiignore](.aiignore))
 - **What NOT to Commit**:
+  - **Sensitive data**: passwords, usernames, emails, API keys, personal configurations, or any personally identifiable information
   - Active config files (`memon.config.json` - user-specific)
   - State files (`memon.state.json` - auto-generated, runtime-specific)
   - Python cache files (`__pycache__/`, `*.pyc`)
