@@ -2038,13 +2038,12 @@ class TestDebugOutput(unittest.TestCase):
 
     def test_debug_log_writes_to_stderr(self):
         """_debug_log writes to stderr when debug=True."""
-        with patch('sys.stderr', new_callable=lambda: open.__class__.__new__(type(sys.stderr))) as mock_stderr:
-            import io
-            buf = io.StringIO()
-            with patch('sys.stderr', buf):
-                memon._debug_log("Test", "hello world", True)
-            output = buf.getvalue()
-            self.assertIn("[Test] hello world", output)
+        import io
+        buf = io.StringIO()
+        with patch('sys.stderr', buf):
+            memon._debug_log("Test", "hello world", True)
+        output = buf.getvalue()
+        self.assertIn("[Test] hello world", output)
 
     def test_debug_log_silent_when_disabled(self):
         """_debug_log produces no output when debug=False."""

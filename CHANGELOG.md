@@ -5,6 +5,11 @@ All notable changes to MeMon will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] - 2026-02-07
+
+### Fixed
+- Fix test compatibility with Python 3.11 on macOS (`test_debug_log_writes_to_stderr` used unsafe `object.__new__` pattern)
+
 ## [1.1.0] - 2026-02-07
 
 ### Added

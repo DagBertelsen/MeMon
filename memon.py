@@ -4,7 +4,7 @@
 #   emoji: 🌐
 #   language: Python
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 """
 MeMon Network Health Monitor for MeshMonitor
