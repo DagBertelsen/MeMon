@@ -1664,10 +1664,52 @@ class TestFormatHelpMessage(unittest.TestCase):
         self.assertIn("status", msg)
         self.assertIn("router", msg)
         self.assertIn("dns", msg)
+        self.assertIn("version", msg)
 
     def test_fits_message_length(self):
         """Help message fits within 200-char limit."""
         self.assertLessEqual(len(memon.format_help_message()), 200)
+
+
+class TestVersion(unittest.TestCase):
+    """Test version information."""
+
+    def test_version_exists(self):
+        """Script has a __version__ attribute."""
+        self.assertTrue(hasattr(memon, '__version__'))
+
+    def test_version_format(self):
+        """Version follows semantic versioning format (X.Y.Z)."""
+        self.assertRegex(memon.__version__, r'^\d+\.\d+\.\d+$')
+
+    def test_version_command_recognized(self):
+        """'version' keyword is recognized as a command."""
+        self.assertEqual(memon.parse_auto_responder_command("version"), "version")
+
+    def test_version_command_case_insensitive(self):
+        """'VERSION' keyword is recognized case-insensitively."""
+        self.assertEqual(memon.parse_auto_responder_command("VERSION"), "version")
+
+    @patch.dict('os.environ', {'MESSAGE': 'version', 'TRIGGER': 'netcheck'})
+    @patch('memon.check_router')
+    @patch('memon.load_config')
+    @patch('memon.emit_alert')
+    def test_version_command_emits_version(self, mock_emit, mock_load_config, mock_check_router):
+        """Version command emits version string without network checks."""
+        mock_load_config.return_value = {
+            "timeoutMs": 2500,
+            "routerCheck": {},
+            "dnsChecks": [],
+            "messages": {}
+        }
+
+        memon.main()
+
+        mock_emit.assert_called_once()
+        message = mock_emit.call_args[0][0]
+        self.assertIn("MeMon v", message)
+        self.assertIn(memon.__version__, message)
+        mock_check_router.assert_not_called()
 
 
 class TestAutoResponderCommandDispatch(unittest.TestCase):

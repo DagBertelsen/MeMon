@@ -45,3 +45,7 @@ jobs:
     - name: Check script has mm_meta block
       run: |
         head -n 5 memon.py | grep -q "mm_meta" || (echo "Missing mm_meta block" && exit 1)
+
+    - name: Check script has version
+      run: |
+        python -c "import memon; print('Version:', memon.__version__)"

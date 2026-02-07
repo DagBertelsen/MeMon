@@ -84,6 +84,7 @@ pre-commit install
 - `memon.state.json` - State file (auto-created, not in repo)
 - [README.md](README.md) - Comprehensive documentation
 - [AGENTS.md](AGENTS.md) - AI instructions (single source of truth)
+- [CHANGELOG.md](CHANGELOG.md) - Version history (follows Keep a Changelog format)
 - [CLAUDE.md](CLAUDE.md) - Claude Code entry point (references AGENTS.md)
 - [.gitignore](.gitignore) - Git ignore rules
 - [.aiignore](.aiignore) - AI tool ignore rules (excludes runtime/sensitive files)
@@ -130,6 +131,7 @@ Core functions implemented in [memon.py](memon.py):
   - `status` or `all` - Full report: router + all DNS (default behavior)
   - `router` - Router-only check
   - `dns` - DNS-only report
+  - `version` - Script version
   - No keyword match - Help guide listing available commands
 - **Output formats** (for status/all command):
   - `"Router DOWN"` - Router unreachable
@@ -193,6 +195,90 @@ See [memon.config.example.json](memon.config.example.json) for a complete exampl
 4. **Update documentation** if configuration or behavior changes
 5. **Follow existing code style** - consistent with current implementation
 
+### Backward Compatibility
+
+Users manually copy `memon.py` to their MeshMonitor instances and create their own `memon.config.json`. Changes must not break existing deployments. The following rules define what is safe and what is breaking.
+
+#### Stability Guarantees
+
+These are the project's public contracts. Breaking any of these requires a major version bump and explicit migration instructions in the CHANGELOG.
+
+**Config Schema (`memon.config.json`)**:
+- Existing field names must not be renamed or removed
+- Existing field types must not change (e.g., integer must stay integer)
+- Existing default values must not change in a way that alters behavior for users who omit the field
+- New fields may be added freely, provided they have sensible defaults that preserve current behavior
+- Nested object structure must be preserved (e.g., `messages.routerDown` must remain at that path)
+
+**State Schema (`memon.state.json`)**:
+- The script must tolerate state files written by older versions (missing fields must get defaults)
+- The script must tolerate state files written by newer versions (unknown fields must be ignored/preserved)
+- Existing field names and types must not change
+- New fields may be added freely with defaults applied when missing
+
+**Output Format (stdout JSON)**:
+- The `{"response": "..."}` format must not change — MeshMonitor and other tools depend on this
+- Silent exit (no stdout) when no alert fires in Timer Trigger mode must be preserved
+- Auto Responder mode must always emit a response
+- The `response` value must remain a string
+
+**mm_meta Block**:
+- The `mm_meta` comment block at the top of `memon.py` (lines 2-5) must not be removed or reformatted
+- Fields `name`, `emoji`, and `language` must remain present
+
+**Environment Variable Contract**:
+- Mode detection via `MESSAGE` and `TRIGGER` environment variables must not change
+- Auto Responder command keywords (`status`, `all`, `router`, `dns`, `version`) must continue to work
+
+**Function Signatures (Public API)**:
+- Functions listed in the "Key Functions" section are considered public API
+- Their names, required parameters, and return types must not change in a breaking way
+- New optional parameters may be added with defaults that preserve existing behavior
+- Internal/helper functions (prefixed with `_`) may change freely
+
+#### What Constitutes a Breaking Change
+
+A change is **breaking** if an existing user who updates only `memon.py` (without modifying their `memon.config.json` or `memon.state.json`) would experience:
+- Script crash or error on startup
+- Changed alerting behavior with their existing configuration
+- Loss of state data or state corruption
+- Different output format that breaks MeshMonitor parsing
+- Changed meaning of existing configuration fields
+
+#### What Is a Non-Breaking Change
+
+These changes are safe and do not require special migration handling:
+- Adding new optional config fields with backward-compatible defaults
+- Adding new state fields with defaults applied when missing
+- Adding new Auto Responder commands (existing commands still work)
+- Adding new functions or internal helpers
+- Performance improvements that do not change behavior
+- Bug fixes that correct behavior to match documented intent
+- Adding new output fields alongside `response` (MeshMonitor ignores unknown fields)
+
+#### How to Safely Add New Features
+
+1. **New config field**: Add to `DEFAULT_CONFIG` with a default that preserves current behavior. Update `memon.config.example.json` and documentation.
+2. **New state field**: Add to `DEFAULT_STATE` with a safe default. The `load_state()` function's merge pattern handles missing fields automatically.
+3. **New alert type**: Add a new message template key to `DEFAULT_CONFIG["messages"]`. Existing configs without it will use the default.
+4. **New Auto Responder command**: Add alongside existing commands without changing their behavior.
+5. **Changing a default value**: This is potentially breaking. Document the change prominently and consider whether it alters behavior for users who rely on the default.
+
+#### Versioning
+
+This project uses [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`.
+
+- **MAJOR**: Breaking changes to config schema, state schema, output format, or behavior (see "What Constitutes a Breaking Change" above)
+- **MINOR**: New features that are backward-compatible (new config fields, new commands, new alert types)
+- **PATCH**: Bug fixes, documentation updates, performance improvements
+
+The version is defined in `__version__` at the top of [memon.py](memon.py). When releasing:
+1. Update `__version__` in `memon.py`
+2. Add entry to [CHANGELOG.md](CHANGELOG.md)
+3. Commit with message: `Release vX.Y.Z`
+4. Tag with: `git tag vX.Y.Z`
+5. Push tag: `git push origin vX.Y.Z`
+
 ### Performance Expectations
 
 - **Typical execution time**: 2-5 seconds (with network checks)
@@ -210,6 +296,9 @@ See [memon.config.example.json](memon.config.example.json) for a complete exampl
 - [ ] Documentation updated if needed
 - [ ] Type hints included for new functions
 - [ ] Docstrings added for new functions
+- [ ] Backward compatibility preserved (see Backward Compatibility section)
+- [ ] New config fields have defaults in DEFAULT_CONFIG
+- [ ] New state fields have defaults in DEFAULT_STATE
 
 ### Testing Requirements
 

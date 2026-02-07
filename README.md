@@ -88,6 +88,7 @@ The script automatically detects and operates in one of two modes based on how i
 - `{trigger} status` - Full report (router + all DNS)
 - `{trigger} router` - Router-only check
 - `{trigger} dns` - DNS-only report
+- `{trigger} version` - Show script version
 - `{trigger}` (no keyword) - Help guide listing available commands
 
 **Use Case**: Send "netcheck status" to get full network status, or just "netcheck" for a list of commands.
@@ -407,7 +408,7 @@ Trigger field value: `memon, memon {argument}`
 | Pattern | Matches | Response |
 |---|---|---|
 | `memon` | `memon` (exact) | Help: lists available commands |
-| `memon {argument}` | `memon status`, `memon router`, `memon dns` | Requested report |
+| `memon {argument}` | `memon status`, `memon router`, `memon dns`, `memon version` | Requested report |
 
 #### 3. Configuration for Auto Responder
 

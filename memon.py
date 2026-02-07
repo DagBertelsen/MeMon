@@ -4,6 +4,8 @@
 #   emoji: 🌐
 #   language: Python
 
+__version__ = "1.0.0"
+
 """
 MeMon Network Health Monitor for MeshMonitor
 
@@ -157,7 +159,7 @@ def parse_auto_responder_command(message: str) -> str:
         message: The raw MESSAGE environment variable value
 
     Returns:
-        Command string: "status", "router", "dns", or "help"
+        Command string: "status", "router", "dns", "version", or "help"
     """
     if not message or not message.strip():
         return "help"
@@ -170,6 +172,8 @@ def parse_auto_responder_command(message: str) -> str:
         return "router"
     if "dns" in text:
         return "dns"
+    if "version" in text:
+        return "version"
 
     return "help"
 
@@ -1016,7 +1020,7 @@ def format_help_message() -> str:
     Returns:
         Help message string (fits within 200-char limit)
     """
-    return "Commands: status (full report), router (router only), dns (DNS only)"
+    return "Commands: status (full report), router (router only), dns (DNS only), version"
 
 
 def _update_state(state: Dict[str, Any], fail_streak: int, down_notified: bool,
@@ -1069,9 +1073,12 @@ def main() -> None:
         ar_message = os.environ.get("MESSAGE", "")
         ar_command = parse_auto_responder_command(ar_message)
 
-        # Help command needs no network checks
+        # Help and version commands need no network checks
         if ar_command == "help":
             emit_alert(format_help_message())
+            return
+        if ar_command == "version":
+            emit_alert("MeMon v" + __version__)
             return
 
     # Calculate remaining time (ensure we finish before MeshMonitor timeout)
