@@ -211,7 +211,7 @@ The script uses `memon.config.json` for all configuration. The configuration fil
 - **`timeoutMs`** (integer, default: 2500): Timeout in milliseconds for each individual check (router and DNS). Total script execution must complete within 10 seconds (MeshMonitor hard limit).
 - **`mustFailCount`** (integer, default: 3): Number of consecutive failures required before sending a DOWN alert. Prevents false positives from transient network issues. **Only used in Timer Trigger mode** — Auto Responder mode is stateless and ignores this setting.
 - **`alertBackoffSeconds`** (integer, default: 900): Minimum time in seconds before the first DOWN alert can fire. Prevents alert spam when services are flapping (rapidly transitioning between up and down). Once the first DOWN alert fires, the `downNotified` flag takes over to prevent repeated alerts during extended outages. **Only used in Timer Trigger mode** — Auto Responder mode is stateless and ignores this setting.
-- **`debug`** (boolean, default: false): If `true`, prints failure messages to stdout for debugging purposes. When `false` (default), only JSON alerts are printed to stdout, ensuring clean output for MeshMonitor. Failure messages include router check failures and DNS check failures with error details.
+- **`debug`** (boolean, default: false): If `true`, prints failure messages to stderr for debugging purposes. When `false` (default), only JSON alerts are printed to stdout, ensuring clean output for MeshMonitor. Debug output goes to stderr so it never interferes with MeshMonitor's JSON parsing. Failure messages include router check failures and DNS check failures with error details.
 
 #### Messages
 
@@ -502,7 +502,7 @@ The script path in MeshMonitor should be:
      - Router recovers but DNS issues remain (routerDown → ispDown/upstreamDnsDown)
      - All DNS failed → some DNS recovered (ispDown → upstreamDnsDown)
      - Some DNS recovered (upstreamDnsDown → upstreamDnsDown with fewer failures)
-9. **Output & Save State**: Emits JSON to stdout only when alert fires (otherwise exits silently), saves updated state. When `debug=true`, failure messages are also printed to stdout for troubleshooting.
+9. **Output & Save State**: Emits JSON to stdout only when alert fires (otherwise exits silently), saves updated state. When `debug=true`, failure messages are also printed to stderr for troubleshooting.
 
 ### State Management
 
@@ -607,7 +607,7 @@ Network services can "flap" - rapidly transitioning between up and down states d
 - Reduce `mustFailCount` for faster alerts (but more false positives)
 - Reduce `alertBackoffSeconds` for faster first alert (only affects timing of first alert)
 - Increase `timeoutMs` if checks are timing out too quickly
-- Enable `"debug": true` in configuration to see detailed failure messages in stdout (useful for troubleshooting, but note this will interfere with MeshMonitor's JSON parsing)
+- Enable `"debug": true` in configuration to see detailed failure messages in stderr (useful for troubleshooting, does not interfere with MeshMonitor's JSON parsing)
 
 ### False Positive Alerts
 
@@ -691,11 +691,11 @@ Enable debug mode to see detailed failure messages for troubleshooting:
 }
 ```
 
-When `debug=true`, the script prints failure messages to stdout, including:
+When `debug=true`, the script prints failure messages to stderr, including:
 - Router check failures with connection details
 - DNS check failures with error messages and timeouts
 
-**Important**: Debug mode should only be used for troubleshooting. When enabled, the failure messages printed to stdout will interfere with MeshMonitor's JSON parsing. Always set `"debug": false` for production use to ensure clean JSON-only output.
+Debug output is written to stderr, so it does not interfere with MeshMonitor's JSON parsing on stdout. Debug mode can be safely left enabled in production if needed for ongoing diagnostics.
 
 ### Custom Message Templates
 

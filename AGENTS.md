@@ -193,6 +193,7 @@ See [memon.config.example.json](memon.config.example.json) for a complete exampl
 2. **Maintain test coverage** - add tests for new functionality
 3. **Respect MeshMonitor timeout** - ensure total execution < 10 seconds
 4. **Update documentation** if configuration or behavior changes
+   - **Always check [README.md](README.md)** when changing behavior in `memon.py` — the README documents debug output, alert logic, execution flow, configuration fields, and troubleshooting steps that must stay in sync with the code
 5. **Follow existing code style** - consistent with current implementation
 
 ### Backward Compatibility
@@ -293,7 +294,7 @@ The version is defined in `__version__` at the top of [memon.py](memon.py). When
 - [ ] No CLI commands used (use Python libraries only)
 - [ ] Timeout protection maintained (< 10s total)
 - [ ] Error handling is graceful
-- [ ] Documentation updated if needed
+- [ ] Documentation updated if needed (check [README.md](README.md) for affected sections)
 - [ ] Type hints included for new functions
 - [ ] Docstrings added for new functions
 - [ ] Backward compatibility preserved (see Backward Compatibility section)
